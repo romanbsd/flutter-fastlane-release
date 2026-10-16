@@ -5,12 +5,20 @@ require 'timeout'
 module CodexRunner
   class Error < StandardError; end
 
+  # Release jobs hold store and signing credentials. The notes assistant only
+  # needs its CLI login and basic process settings, never those job secrets.
+  CHILD_ENV_KEYS = %w[HOME PATH USER LOGNAME LANG LC_ALL LC_CTYPE TMPDIR
+                      XDG_CONFIG_HOME XDG_CACHE_HOME CODEX_HOME SSL_CERT_FILE
+                      SSL_CERT_DIR].freeze
+
   def self.run(command, root:, timeout:, log_path:)
     raise Error, 'Codex working directory does not exist.' unless File.directory?(root)
     raise Error, 'Codex log directory does not exist.' unless File.directory?(File.dirname(log_path))
 
     begin
-      pid = Process.spawn(*command, chdir: root, out: log_path, err: [:child, :out], pgroup: true)
+      child_env = ENV.to_h.select { |key, _| CHILD_ENV_KEYS.include?(key) }
+      pid = Process.spawn(child_env, *command, chdir: root, out: log_path,
+                         err: [:child, :out], pgroup: true, unsetenv_others: true)
     rescue Errno::ENOENT => e
       raise Error, 'Codex working or log directory disappeared.' unless File.directory?(root) && File.directory?(File.dirname(log_path))
       raise Error, "Codex executable could not be started: #{e.message}. Install codex and authenticate it before generating release notes."

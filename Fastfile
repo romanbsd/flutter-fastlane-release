@@ -327,6 +327,7 @@ def existing_testflight_encryption(version, build_number, api_options)
   path = api_options[:api_key_path]
   UI.user_error!('APP_STORE_CONNECT_API_KEY_PATH is required for TestFlight redistribution.') if path.to_s.empty?
   previous_client = Spaceship::ConnectAPI.client
+  previous_token = Spaceship::ConnectAPI.token
   begin
     Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.from_json_file(path)
     identifier = CredentialsManager::AppfileConfig.try_fetch_value(:app_identifier)
@@ -339,6 +340,7 @@ def existing_testflight_encryption(version, build_number, api_options)
     UI.user_error!('Complete export compliance for the selected build in App Store Connect before redistributing.') unless [true, false].include?(declaration)
     declaration
   ensure
+    Spaceship::ConnectAPI.token = previous_token
     Spaceship::ConnectAPI.client = previous_client
   end
 end

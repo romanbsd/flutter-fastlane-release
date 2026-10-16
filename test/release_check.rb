@@ -6,11 +6,24 @@ require 'fileutils'
 require 'json'
 require 'minitest/autorun'
 require 'tmpdir'
+require_relative '../lib/codex_runner'
 
 Fastlane.load_actions
 
 class SharedReleaseCheck < Minitest::Test
   FASTFILE = File.expand_path('../Fastfile', __dir__)
+
+  def test_notes_runner_does_not_inherit_release_secrets
+    Dir.mktmpdir('codex-runner-check-') do |root|
+      log = File.join(root, 'log.txt')
+      ENV['ANDROID_KEYSTORE_PASSWORD'] = 'fixture-secret'
+      CodexRunner.run([Gem.ruby, '-e', 'puts ENV.fetch("ANDROID_KEYSTORE_PASSWORD", "absent")'],
+                      root: root, timeout: 5, log_path: log)
+      assert_equal "absent\n", File.read(log)
+    ensure
+      ENV.delete('ANDROID_KEYSTORE_PASSWORD')
+    end
+  end
 
   def setup
     @saved_env = ENV.to_h
@@ -18,6 +31,8 @@ class SharedReleaseCheck < Minitest::Test
     write('pubspec.yaml', "name: fixture\nversion: 1.1.0+26\n")
     write('fastlane/release_notes/1.1.0+28.txt', "iOS changes\n")
     write('fastlane/release_notes/1.1.0+31.txt', "Android changes\n")
+    write('fastlane/release_notes/1.1.0+27.txt', "Earlier iOS changes\n")
+    write('fastlane/release_notes/1.1.0+30.txt', "Earlier Android changes\n")
     write('android/key.properties', 'fixture only')
     write('android/app/google-services.json', '{"client":[{"client_info":{"mobilesdk_app_id":"android-fixture"}}]}')
     FileUtils.mkdir_p(File.join(@root, 'ios/Runner'))
@@ -60,10 +75,12 @@ class SharedReleaseCheck < Minitest::Test
 
   def test_store_number_checks_fail_before_build
     ENV['ANDROID_BUILD_NUMBER'] = '30'
-    assert_raises(FastlaneCore::Interface::FastlaneError) { @fastfile.release_plan([:android]) }
+    error = assert_raises(FastlaneCore::Interface::FastlaneError) { @fastfile.release_plan([:android]) }
+    assert_match(/must exceed.*Play tracks/, error.message)
     ENV['ANDROID_BUILD_NUMBER'] = '31'
     ENV['IOS_BUILD_NUMBER'] = '27'
-    assert_raises(FastlaneCore::Interface::FastlaneError) { @fastfile.release_plan([:ios]) }
+    error = assert_raises(FastlaneCore::Interface::FastlaneError) { @fastfile.release_plan([:ios]) }
+    assert_match(/must exceed.*iOS build/, error.message)
   end
 
   def test_build_only_requires_its_own_explicit_build_number
