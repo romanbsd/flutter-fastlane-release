@@ -56,7 +56,7 @@ class SharedReleaseCheck < Minitest::Test
     write('fastlane/release_notes/1.1.0+31.txt', "Android changes\n")
     write('fastlane/release_notes/1.1.0+27.txt', "Earlier iOS changes\n")
     write('fastlane/release_notes/1.1.0+30.txt', "Earlier Android changes\n")
-    write('android/key.properties', 'fixture only')
+    write('android/key.properties', "storeFile=fixture.jks\nstorePassword=fixture\nkeyAlias=fixture\nkeyPassword=fixture\n")
     write('android/app/google-services.json', '{"client":[{"client_info":{"mobilesdk_app_id":"android-fixture"}}]}')
     FileUtils.mkdir_p(File.join(@root, 'ios/Runner'))
     write('ios/Runner/Info.plist', '<?xml version="1.0"?><plist version="1.0"><dict/></plist>')
@@ -76,6 +76,7 @@ class SharedReleaseCheck < Minitest::Test
     @fastfile.instance_variable_set(:@fixture_root, @root)
     @fastfile.define_singleton_method(:ensure_git_status_clean) { |**_| true }
     @fastfile.define_singleton_method(:is_ci) { false }
+    @fastfile.define_singleton_method(:ensure_ios_toolchain!) { true }
     @fastfile.define_singleton_method(:sh) do |*args, **_|
       args.first == 'git' ? "fixture-commit\n" : ''
     end
@@ -114,6 +115,21 @@ class SharedReleaseCheck < Minitest::Test
     ENV['ANDROID_BUILD_NUMBER'] = '31'
     plan = @fastfile.release_plan([:android], for_upload: false)
     assert_equal 31, plan[:build_numbers][:android]
+  end
+
+  def test_android_signing_requires_all_configuration_fields
+    write('android/key.properties', "storeFile=fixture.jks\n")
+    error = assert_raises(FastlaneCore::Interface::FastlaneError) { @fastfile.ensure_android_release_signing! }
+    assert_match(/ANDROID_KEYSTORE_PASSWORD/, error.message)
+  end
+
+  def test_ios_toolchain_requires_current_xcode_and_sdk
+    @fastfile.singleton_class.remove_method(:ensure_ios_toolchain!)
+    @fastfile.define_singleton_method(:sh) do |*args, **_|
+      args.first == 'xcodebuild' ? "Xcode 25.4\nBuild version 1\n" : "26.0\n"
+    end
+    error = assert_raises(FastlaneCore::Interface::FastlaneError) { @fastfile.ensure_ios_toolchain! }
+    assert_match(/Xcode 26/, error.message)
   end
 
   def test_missing_or_uncommitted_notes_fail_closed
@@ -179,6 +195,22 @@ class SharedReleaseCheck < Minitest::Test
     @fastfile.firebase_distribution_enabled!
     assert_equal 'ios-fixture', @fastfile.firebase_app_id(:ios)
     assert_equal 'android-fixture', @fastfile.firebase_app_id(:android)
+  end
+
+  def test_external_testflight_requires_beta_test_information
+    ENV['TESTFLIGHT_DISTRIBUTE_EXTERNAL'] = 'true'
+    ENV['TESTFLIGHT_GROUPS'] = 'External'
+    ENV.delete('TESTFLIGHT_BETA_APP_DESCRIPTION')
+    ENV.delete('TESTFLIGHT_BETA_APP_FEEDBACK_EMAIL')
+    error = assert_raises(FastlaneCore::Interface::FastlaneError) do
+      @fastfile.testflight_options(include_compliance: false)
+    end
+    assert_match(/BETA_APP_DESCRIPTION/, error.message)
+    ENV['TESTFLIGHT_BETA_APP_DESCRIPTION'] = 'Try the beta features.'
+    ENV['TESTFLIGHT_BETA_APP_FEEDBACK_EMAIL'] = 'feedback@example.test'
+    options = @fastfile.testflight_options(include_compliance: false)
+    assert_equal 'Try the beta features.', options[:beta_app_description]
+    assert_equal 'feedback@example.test', options[:beta_app_feedback_email]
   end
 
   def test_combined_release_records_confirmed_and_unknown_upload_outcomes

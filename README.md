@@ -49,7 +49,14 @@ version/build and use the matching committed notes.
 Android beta accepts only `internal`, `alpha`, or `beta` via
 `PLAY_STORE_BETA_TRACK`. `PLAY_STORE_VALIDATE_ONLY=true` validates an Android
 Play edit without releasing it. TestFlight distribution uses
-`TESTFLIGHT_GROUPS` and `TESTFLIGHT_DISTRIBUTE_EXTERNAL`. iOS signing uses
+`TESTFLIGHT_GROUPS` and `TESTFLIGHT_DISTRIBUTE_EXTERNAL`.
+For external TestFlight testing, also provide the app-specific
+`TESTFLIGHT_BETA_APP_DESCRIPTION` and `TESTFLIGHT_BETA_APP_FEEDBACK_EMAIL`,
+and complete beta review contact/demo-account details in App Store Connect.
+External builds may require Apple's beta review before testers can install them.
+The current App Store upload minimum is Xcode 26 with an iOS 26 SDK, and
+Google Play updates must target Android API 36 or later. Verify current store
+requirements before each release. iOS signing uses
 read-only `match`; `APPLE_TEAM_ID` and pre-provisioned signing assets are
 required. `APP_STORE_CONNECT_API_KEY_PATH` is required in CI. App Store review
 submission is a separate `ios release` lane, enabled by the app's

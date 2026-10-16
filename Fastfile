@@ -195,13 +195,31 @@ end
 
 def ensure_android_release_signing!
   key_properties_path = File.join(project_root, 'android', 'key.properties')
-  env_keys = %w[ANDROID_KEYSTORE_PATH ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD]
-  return if File.file?(key_properties_path) || env_keys.all? { |key| !ENV[key].to_s.strip.empty? }
+  properties = {}
+  if File.file?(key_properties_path)
+    File.foreach(key_properties_path) do |line|
+      key, value = line.strip.split(/\s*[=:]\s*/, 2)
+      properties[key] = value if value
+    end
+  end
+  fields = {
+    'ANDROID_KEYSTORE_PATH' => 'storeFile',
+    'ANDROID_KEYSTORE_PASSWORD' => 'storePassword',
+    'ANDROID_KEY_ALIAS' => 'keyAlias',
+    'ANDROID_KEY_PASSWORD' => 'keyPassword'
+  }
+  missing = fields.filter_map do |environment, property|
+    environment if (ENV[environment].to_s.strip.empty? && properties[property].to_s.strip.empty?)
+  end
+  UI.user_error!("Android release signing is incomplete: set #{missing.join(', ')} or the corresponding android/key.properties values.") unless missing.empty?
+end
 
-  UI.user_error!(
-    'Android Play uploads require release signing. Add android/key.properties or set ' \
-    'ANDROID_KEYSTORE_PATH, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, and ANDROID_KEY_PASSWORD.'
-  )
+def ensure_ios_toolchain!
+  xcode = sh('xcodebuild', '-version', log: false)[/^Xcode\s+(\d+)/, 1].to_i
+  sdk = sh('xcrun', '--sdk', 'iphoneos', '--show-sdk-version', log: false).strip.split('.').first.to_i
+  UI.user_error!('App Store uploads require Xcode 26 or later with an iOS 26 or later SDK.') if xcode < 26 || sdk < 26
+rescue FastlaneCore::Interface::FastlaneShellError, Errno::ENOENT
+  UI.user_error!('Cannot verify the selected Xcode/iOS SDK; select Xcode 26 or later before building for App Store Connect.')
 end
 
 def play_store_options
@@ -238,6 +256,11 @@ def testflight_options(include_compliance: true, require_api_key: false)
   groups = env_list('TESTFLIGHT_GROUPS')
   external = env_boolean('TESTFLIGHT_DISTRIBUTE_EXTERNAL')
   UI.user_error!('TESTFLIGHT_GROUPS is required when TESTFLIGHT_DISTRIBUTE_EXTERNAL is true.') if external && groups.empty?
+  description = ENV['TESTFLIGHT_BETA_APP_DESCRIPTION'].to_s.strip
+  feedback_email = ENV['TESTFLIGHT_BETA_APP_FEEDBACK_EMAIL'].to_s.strip
+  if external && (description.empty? || feedback_email.empty?)
+    UI.user_error!('External TestFlight testing requires TESTFLIGHT_BETA_APP_DESCRIPTION and TESTFLIGHT_BETA_APP_FEEDBACK_EMAIL.')
+  end
   options = {
     skip_waiting_for_build_processing: false,
     distribute_external: external, submit_beta_review: external,
@@ -245,6 +268,8 @@ def testflight_options(include_compliance: true, require_api_key: false)
   }
   options[:uses_non_exempt_encryption] = ios_encryption_declaration if include_compliance
   options[:groups] = groups unless groups.empty?
+  options[:beta_app_description] = description unless description.empty?
+  options[:beta_app_feedback_email] = feedback_email unless feedback_email.empty?
   notify = env_boolean('TESTFLIGHT_NOTIFY_EXTERNAL_TESTERS')
   options[:notify_external_testers] = notify if external
   options
@@ -285,6 +310,7 @@ def release_plan(platforms, for_upload: true)
     ensure_android_release_signing! if for_upload || !plan[:android][:validate_only]
   end
   if platforms.include?(:ios)
+    ensure_ios_toolchain!
     app_store_version(plan[:version])
     plan[:ios] = for_upload ? testflight_options : app_store_connect_api_key_options
     plan[:team_id] = required_env('APPLE_TEAM_ID')
