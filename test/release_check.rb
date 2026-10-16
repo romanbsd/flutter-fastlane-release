@@ -124,6 +124,25 @@ class SharedReleaseCheck < Minitest::Test
     assert_equal 'android-fixture', @fastfile.firebase_app_id(:android)
   end
 
+  def test_combined_release_records_confirmed_and_unknown_upload_outcomes
+    ipa = write('build/ios/ipa/fixture.ipa', 'ipa bytes')
+    aab = write('build/app/outputs/bundle/release/fixture.aab', 'aab bytes')
+    @fastfile.define_singleton_method(:prepare_release) { |_| nil }
+    @fastfile.define_singleton_method(:build_signed_ios_ipa) { |*_args| ipa }
+    @fastfile.define_singleton_method(:build_android_aab) { |_number| aab }
+    @fastfile.define_singleton_method(:upload_to_testflight) { |**_options| true }
+    @fastfile.define_singleton_method(:upload_android_aab) { |*_args| raise 'simulated upload interruption' }
+
+    assert_raises(RuntimeError) { @fastfile.run_beta_release(%i[ios android]) }
+    status = JSON.parse(File.read(File.join(@root, 'build/release/status.json')))
+    assert_equal 'failed', status['state']
+    assert_equal 'uploaded', status.dig('platforms', 'ios', 'status')
+    assert_equal 'upload_outcome_unknown', status.dig('platforms', 'android', 'status')
+    assert_equal Digest::SHA256.file(aab).hexdigest, status.dig('platforms', 'android', 'sha256')
+    assert_equal 28, status.dig('build_numbers', 'ios')
+    assert_equal 31, status.dig('build_numbers', 'android')
+  end
+
   private
 
   def write(path, content)
