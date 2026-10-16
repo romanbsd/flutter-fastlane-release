@@ -55,6 +55,12 @@ required. `APP_STORE_CONNECT_API_KEY_PATH` is required in CI. App Store review
 submission is a separate `ios release` lane, enabled by the app's
 `IOS_RELEASE_MODE=app_store_submission` setting; it selects an existing build
 and manual release after approval.
+Apps that previously used `ios release` for TestFlight can set
+`IOS_RELEASE_MODE=testflight_alias`; `ANDROID_RELEASE_MODE=beta_alias` likewise
+retains an Android beta alias. `ENABLE_FIREBASE_DISTRIBUTION=true` enables
+`ios firebase_beta` and `android firebase_beta`; they require the app's Firebase
+config, explicit platform build number, committed notes, and Fastlane Firebase
+plugin. App Store submission and Firebase distribution remain opt-in.
 
 ## Verification and upgrades
 

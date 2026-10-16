@@ -19,8 +19,10 @@ class SharedReleaseCheck < Minitest::Test
     write('fastlane/release_notes/1.1.0+28.txt', "iOS changes\n")
     write('fastlane/release_notes/1.1.0+31.txt', "Android changes\n")
     write('android/key.properties', 'fixture only')
+    write('android/app/google-services.json', '{"client":[{"client_info":{"mobilesdk_app_id":"android-fixture"}}]}')
     FileUtils.mkdir_p(File.join(@root, 'ios/Runner'))
     write('ios/Runner/Info.plist', '<?xml version="1.0"?><plist version="1.0"><dict/></plist>')
+    write('ios/Runner/GoogleService-Info.plist', '<?xml version="1.0"?><plist version="1.0"><dict><key>GOOGLE_APP_ID</key><string>ios-fixture</string></dict></plist>')
     system('git', '-C', @root, 'init', '-q', exception: true)
     system('git', '-C', @root, 'add', '.', exception: true)
     system('git', '-C', @root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test',
@@ -111,6 +113,15 @@ class SharedReleaseCheck < Minitest::Test
     end
     assert_equal 30, action.run(pubspec_path: path, build_number: 30)
     assert_includes File.read(path), 'version: 1.1.0+30'
+  end
+
+  def test_firebase_distribution_is_opt_in_and_uses_app_configuration
+    ENV.delete('ENABLE_FIREBASE_DISTRIBUTION')
+    assert_raises(FastlaneCore::Interface::FastlaneError) { @fastfile.firebase_distribution_enabled! }
+    ENV['ENABLE_FIREBASE_DISTRIBUTION'] = 'true'
+    @fastfile.firebase_distribution_enabled!
+    assert_equal 'ios-fixture', @fastfile.firebase_app_id(:ios)
+    assert_equal 'android-fixture', @fastfile.firebase_app_id(:android)
   end
 
   private

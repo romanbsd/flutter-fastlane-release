@@ -324,6 +324,25 @@ def existing_testflight_encryption(version, build_number, api_options)
   end
 end
 
+def firebase_distribution_enabled!
+  UI.user_error!('Firebase App Distribution is not enabled for this app.') unless env_boolean('ENABLE_FIREBASE_DISTRIBUTION')
+end
+
+def firebase_app_id(platform)
+  if platform == :ios
+    path = ENV['GOOGLESERVICE_INFO_PLIST_PATH'].to_s.strip
+    path = File.join(project_root, 'ios/Runner/GoogleService-Info.plist') if path.empty?
+    value = Plist.parse_xml(path)&.fetch('GOOGLE_APP_ID', nil)
+  else
+    path = File.join(project_root, 'android/app/google-services.json')
+    value = JSON.parse(File.read(path)).dig('client', 0, 'client_info', 'mobilesdk_app_id')
+  end
+  UI.user_error!("Missing #{platform} Firebase app ID in #{path}.") if value.to_s.empty?
+  value
+rescue Errno::ENOENT, JSON::ParserError
+  UI.user_error!("Cannot read #{platform} Firebase configuration: #{path}.")
+end
+
 platform :ios do
   desc 'Build an App Store-signed IPA and upload it to TestFlight'
   lane :beta do
@@ -363,6 +382,10 @@ platform :ios do
 
   desc 'Submit a tested TestFlight build for App Review with manual release after approval'
   lane :release do
+    if ENV['IOS_RELEASE_MODE'] == 'testflight_alias'
+      run_beta_release([:ios])
+      next
+    end
     UI.user_error!('App Store submission is disabled for this app.') unless ENV['IOS_RELEASE_MODE'] == 'app_store_submission'
     version = app_store_version(required_env('APP_STORE_VERSION'))
     build_number = positive_integer('APP_STORE_BUILD_NUMBER', required: true).to_s
@@ -386,11 +409,32 @@ platform :ios do
     end
     UI.success('Build submitted for App Review. Release manually in App Store Connect after approval.')
   end
+
+  desc 'Build an Ad Hoc IPA and distribute it through Firebase when enabled'
+  lane :firebase_beta do
+    firebase_distribution_enabled!
+    plan = release_plan([:ios], for_upload: false)
+    notes = release_notes(version: plan[:version], build_number: plan[:build_numbers][:ios])
+    prepare_release(plan)
+    match(type: 'adhoc', readonly: true, **plan[:ios].slice(:api_key_path))
+    started_at = Time.now
+    flutter('build', 'ipa', '--release', *ios_build_args(build_number: plan[:build_numbers][:ios]))
+    ipa = build_artifact('build/ios/ipa/*.ipa', since: started_at)
+    firebase_app_distribution(app: firebase_app_id(:ios), ipa_path: ipa,
+                              groups: ENV.fetch('FIREBASE_IOS_GROUPS', 'beta-testers'),
+                              release_notes: notes)
+  end
 end
 
 platform :android do
   desc 'Build an Android App Bundle and upload it to a Google Play testing track'
   lane :beta do
+    run_beta_release([:android])
+  end
+
+  desc 'Compatibility alias for the configured Google Play beta track'
+  lane :release do
+    UI.user_error!('Android release alias is disabled for this app.') unless ENV['ANDROID_RELEASE_MODE'] == 'beta_alias'
     run_beta_release([:android])
   end
 
@@ -430,6 +474,20 @@ platform :android do
       sync_image_upload: true,
       validate_only: env_boolean('PLAY_STORE_VALIDATE_ONLY')
     )
+  end
+
+  desc 'Build a signed APK and distribute it through Firebase when enabled'
+  lane :firebase_beta do
+    firebase_distribution_enabled!
+    plan = release_plan([:android], for_upload: false)
+    notes = release_notes(version: plan[:version], build_number: plan[:build_numbers][:android])
+    prepare_release(plan)
+    started_at = Time.now
+    flutter('build', 'apk', '--release', *flutter_build_args(plan[:build_numbers][:android]))
+    apk = build_artifact('build/app/outputs/flutter-apk/app-release.apk', since: started_at)
+    firebase_app_distribution(app: firebase_app_id(:android), apk_path: apk,
+                              groups: ENV.fetch('FIREBASE_ANDROID_GROUPS', 'spore'),
+                              release_notes: notes)
   end
 end
 
