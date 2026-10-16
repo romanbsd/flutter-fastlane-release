@@ -39,6 +39,7 @@ class SharedReleaseCheck < Minitest::Test
   def test_ios_encryption_declaration_uses_embedded_value_and_rejects_conflict
     info_path = File.join(@root, 'ios', 'Runner', 'Info.plist')
     File.write(info_path, '<?xml version="1.0"?><plist version="1.0"><dict><key>ITSAppUsesNonExemptEncryption</key><false/></dict></plist>')
+    ENV.delete('USES_NON_EXEMPT_ENCRYPTION')
     assert_equal false, @fastfile.ios_encryption_declaration
     ENV['USES_NON_EXEMPT_ENCRYPTION'] = 'true'
     error = assert_raises(FastlaneCore::Interface::FastlaneError) { @fastfile.ios_encryption_declaration }
@@ -230,6 +231,15 @@ class SharedReleaseCheck < Minitest::Test
     assert_equal Digest::SHA256.file(aab).hexdigest, status.dig('platforms', 'android', 'sha256')
     assert_equal 28, status.dig('build_numbers', 'ios')
     assert_equal 31, status.dig('build_numbers', 'android')
+  end
+
+  def test_status_write_failure_preserves_original_release_error
+    @fastfile.define_singleton_method(:release_plan) { |_platforms| raise 'original release failure' }
+    @fastfile.define_singleton_method(:write_release_status) do |plan, _results|
+      raise 'status write failure' if plan[:state] == 'failed'
+    end
+    error = assert_raises(RuntimeError) { @fastfile.run_beta_release([:android]) }
+    assert_equal 'original release failure', error.message
   end
 
   private

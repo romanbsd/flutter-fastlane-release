@@ -30,7 +30,7 @@ module CodexRunner
       file.seek(-[file.size, 16_384].min, IO::SEEK_END)
       file.read
     end.force_encoding(Encoding::UTF_8).scrub
-    reason = if log.match?(/unauthorized|authentication (?:failed|required)|not logged in|HTTP\S*\s+401|status(?: code)?[:= ]+401|invalid.api.key/i)
+    reason = if log.match?(/unauthorized|authentication (?:failed|required)|not logged in|HTTP\S*\s+401|(?:status|code|error)["']?\s*[:=]?\s*401|invalid.api.key/i)
                'authentication failed; authenticate the Codex CLI before retrying'
              else
                'execution/service failed; check Codex connectivity and CLI authentication'

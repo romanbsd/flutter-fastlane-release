@@ -52,6 +52,7 @@ module IosSigning
     project_path = File.join(project_root, 'ios', 'Runner.xcodeproj')
     settings_path = File.join(project_path, 'project.pbxproj')
     original_settings = File.binread(settings_path)
+    build_error = nil
     begin
       update_code_signing_settings(
         path: project_path, use_automatic_signing: false,
@@ -62,13 +63,19 @@ module IosSigning
       )
       flutter('build', 'ipa', '--release', "--export-options-plist=#{export_path}",
               *ios_build_args(build_number: build_number))
+    rescue StandardError => error
+      build_error = error
+      raise
     ensure
       restore_path = "#{settings_path}.fastlane-restore-#{Process.pid}"
       begin
         File.binwrite(restore_path, original_settings)
         File.rename(restore_path, settings_path)
+      rescue StandardError => restore_error
+        raise unless build_error
+        FastlaneCore::UI.error("Could not restore project.pbxproj after iOS build failure: #{restore_error.message}")
       ensure
-        File.delete(restore_path) if File.exist?(restore_path)
+        FileUtils.rm_f(restore_path) rescue nil
       end
     end
 

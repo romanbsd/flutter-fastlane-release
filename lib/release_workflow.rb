@@ -28,6 +28,7 @@ module ReleaseWorkflow
       state: 'running', phase: 'preflight'
     }
     results = platforms.to_h { |platform| [platform, { status: 'planned' }] }
+    release_error = nil
     begin
       write_release_status(plan, results)
       plan.merge!(release_plan(platforms))
@@ -67,7 +68,8 @@ module ReleaseWorkflow
       end
       plan[:state] = 'succeeded'
       plan[:phase] = 'complete'
-    rescue StandardError
+    rescue StandardError => error
+      release_error = error
       plan[:state] = 'failed'
       results.each_value do |result|
         result[:status] = 'upload_outcome_unknown' if result[:status] == 'uploading'
@@ -75,11 +77,10 @@ module ReleaseWorkflow
       end
       raise
     ensure
-      primary_error = $!
       begin
         write_release_status(plan, results)
       rescue StandardError => status_error
-        raise unless primary_error
+        raise unless release_error
         FastlaneCore::UI.error("Could not update build/release/status.json after release failure: #{status_error.message}")
       end
     end
