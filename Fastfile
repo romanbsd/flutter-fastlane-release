@@ -310,7 +310,7 @@ def release_plan(platforms, for_upload: true)
     ensure_android_release_signing! if for_upload || !plan[:android][:validate_only]
   end
   if platforms.include?(:ios)
-    ensure_ios_toolchain!
+    ensure_ios_toolchain! if for_upload
     app_store_version(plan[:version])
     plan[:ios] = for_upload ? testflight_options : app_store_connect_api_key_options
     plan[:team_id] = required_env('APPLE_TEAM_ID')

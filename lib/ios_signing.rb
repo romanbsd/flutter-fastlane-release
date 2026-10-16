@@ -27,6 +27,7 @@ module IosSigning
   end
 
   def build_signed_ios_ipa(api_key_options, team_id, build_number)
+    ensure_ios_toolchain!
     started_at = Time.now
     setup_ci if is_ci
     identifier = CredentialsManager::AppfileConfig.try_fetch_value(:app_identifier)

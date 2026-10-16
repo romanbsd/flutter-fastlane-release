@@ -133,6 +133,12 @@ class SharedReleaseCheck < Minitest::Test
     assert_match(/Xcode 26/, error.message)
   end
 
+  def test_ios_non_store_preflight_does_not_require_app_store_toolchain
+    @fastfile.define_singleton_method(:ensure_ios_toolchain!) { raise 'App Store-only check invoked' }
+    plan = @fastfile.release_plan([:ios], for_upload: false)
+    assert_equal 28, plan[:build_numbers][:ios]
+  end
+
   def test_missing_or_uncommitted_notes_fail_closed
     ENV['ANDROID_BUILD_NUMBER'] = '32'
     assert_raises(FastlaneCore::Interface::FastlaneError) { @fastfile.release_plan([:android]) }
