@@ -486,7 +486,7 @@ platform :android do
     flutter('build', 'apk', '--release', *flutter_build_args(plan[:build_numbers][:android]))
     apk = build_artifact('build/app/outputs/flutter-apk/app-release.apk', since: started_at)
     firebase_app_distribution(app: firebase_app_id(:android), apk_path: apk,
-                              groups: ENV.fetch('FIREBASE_ANDROID_GROUPS', 'spore'),
+                              groups: ENV.fetch('FIREBASE_ANDROID_GROUPS', 'beta-testers'),
                               release_notes: notes)
   end
 end
