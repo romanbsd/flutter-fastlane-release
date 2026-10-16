@@ -1,0 +1,10 @@
+.DS_Store
+.bundle/
+vendor/bundle/
+*.gem
+fastlane/.env*
+*.p8
+*.jks
+*.keystore
+*.json
+!Gemfile.lock
