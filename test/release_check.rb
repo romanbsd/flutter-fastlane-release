@@ -103,6 +103,20 @@ class SharedReleaseCheck < Minitest::Test
     end
   end
 
+  def test_existing_artifact_must_match_appfile_identity
+    @fastfile.define_singleton_method(:expected_app_identifier) { |_field| 'org.example.fixture' }
+    @fastfile.define_singleton_method(:get_ipa_info_plist_value) do |ipa:, key:|
+      key == 'DTPlatformName' ? 'iphoneos' : 'org.example.other'
+    end
+    assert_raises(FastlaneCore::Interface::FastlaneError) do
+      @fastfile.verify_artifact_identity!('fixture.ipa', platform: :ios)
+    end
+    @fastfile.define_singleton_method(:aab_manifest_value) { |_path, _attribute| 'org.example.other' }
+    assert_raises(FastlaneCore::Interface::FastlaneError) do
+      @fastfile.verify_artifact_identity!('fixture.aab', platform: :android)
+    end
+  end
+
   def test_explicit_shared_bump_action_only_changes_pubspec
     path = File.join(@root, 'pubspec.yaml')
     action = Fastlane::Actions::BumpPubspecBuildAction

@@ -126,8 +126,9 @@ def aab_manifest_value(path, attribute)
               UI.user_error!("BUNDLETOOL_JAR not found: #{jar}") unless File.file?(jar)
               ['java', '-jar', jar]
             end
+  xpath = attribute == 'package' ? '/manifest/@package' : "/manifest/@android:#{attribute}"
   sh(*command, 'dump', 'manifest', "--bundle=#{path}", '--module=base',
-     "--xpath=/manifest/@android:#{attribute}", log: false).strip
+     "--xpath=#{xpath}", log: false).strip
 end
 
 def artifact_version(path, platform)
@@ -148,6 +149,24 @@ def artifact_build_number(path, platform)
   positive_integer('artifact build number', value, required: true)
 rescue FastlaneCore::Interface::FastlaneShellError, Errno::ENOENT
   UI.user_error!('Cannot read artifact build number; inspect the IPA or AAB before retrying.')
+end
+
+def verify_artifact_identity!(path, platform:)
+  field = platform == :ios ? :app_identifier : :package_name
+  expected = expected_app_identifier(field)
+  UI.user_error!("Appfile #{field} is required for artifact uploads.") if expected.empty?
+  actual = if platform == :ios
+             device = get_ipa_info_plist_value(ipa: path, key: 'DTPlatformName').to_s.strip
+             UI.user_error!('IPA is not an iPhoneOS device build.') unless device == 'iphoneos'
+             get_ipa_info_plist_value(ipa: path, key: 'CFBundleIdentifier').to_s.strip
+           else
+             aab_manifest_value(path, 'package')
+           end
+  UI.user_error!("Artifact app ID #{actual.inspect} does not match Appfile #{expected.inspect}.") unless actual == expected
+end
+
+def expected_app_identifier(field)
+  CredentialsManager::AppfileConfig.try_fetch_value(field).to_s.strip
 end
 
 def artifact_encryption(ipa)
@@ -359,6 +378,7 @@ platform :ios do
   desc 'Upload an existing IPA to TestFlight without rebuilding or bumping'
   lane :upload do |options|
     ipa = existing_artifact(options[:ipa], '.ipa')
+    verify_artifact_identity!(ipa, platform: :ios)
     version = artifact_version(ipa, :ios)
     build_number = artifact_build_number(ipa, :ios)
     notes = release_notes(version: version, build_number: build_number)
@@ -448,6 +468,7 @@ platform :android do
   desc 'Upload or validate an existing AAB without rebuilding or bumping'
   lane :upload do |options|
     aab = existing_artifact(options[:aab], '.aab')
+    verify_artifact_identity!(aab, platform: :android)
     play_options = play_store_options
     version = artifact_version(aab, :android)
     build_number = artifact_build_number(aab, :android)
