@@ -2,9 +2,10 @@
 .bundle/
 vendor/bundle/
 *.gem
-fastlane/.env*
+fastlane/.env
+fastlane/.env.*
+!fastlane/.env.example
 *.p8
 *.jks
 *.keystore
-*.json
-!Gemfile.lock
+android/key.properties

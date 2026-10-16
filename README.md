@@ -64,7 +64,9 @@ plugin. App Store submission and Firebase distribution remain opt-in.
 
 ## Verification and upgrades
 
-Run `ruby test/release_check.rb` with the app's Ruby/Fastlane bundle. Before
+Run `bundle exec ruby test/release_check.rb` in this repository. Dependabot
+checks the standalone test bundle and CI actions weekly; review its PRs and
+the passing CI job before merging. Before
 updating the submodule pin, review the shared commit range, run this test, and
 run `bundle exec fastlane lanes` plus each app's release checks. Update the
 submodule in each app through its master branch. No store upload is part of the
