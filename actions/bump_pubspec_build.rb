@@ -7,12 +7,18 @@ module Fastlane
     class BumpPubspecBuildAction < Action
       def self.run(params)
         path = params[:pubspec_path].to_s.strip
-        path = File.join(FastlaneCore::FastlaneFolder.path, '..', 'pubspec.yaml') if path.empty?
+        if path.empty?
+          fastlane_dir = FastlaneCore::FastlaneFolder.path
+          UI.user_error!('Provide pubspec_path; no application fastlane directory was found.') if fastlane_dir.to_s.empty?
+          path = File.join(fastlane_dir, '..', 'pubspec.yaml')
+        end
         path = File.expand_path(path)
         UI.user_error!("pubspec.yaml not found: #{path}") unless File.file?(path)
         current = PubspecVersion.read(path)
         selected = params[:build_number] || current[:build_number] + 1
-        UI.user_error!('build_number must increase the pubspec build number.') unless selected.to_s.match?(/\A\d+\z/) && selected.to_i > current[:build_number]
+        UI.user_error!('build_number must be a positive integer.') unless selected.to_s.match?(/\A\d+\z/) && selected.to_i.positive?
+        UI.user_error!('build_number must increase the pubspec build number.') unless selected.to_i > current[:build_number]
+        UI.user_error!('build_number must not exceed the Google Play version-code limit of 2,100,000,000.') if selected.to_i > 2_100_000_000
         updated = current[:content].sub(PubspecVersion::PATTERN) do
           "version: #{Regexp.last_match[:version]}+#{selected}"
         end

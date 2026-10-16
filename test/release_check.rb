@@ -127,6 +127,9 @@ class SharedReleaseCheck < Minitest::Test
     end
     assert_equal 30, action.run(pubspec_path: path, build_number: 30)
     assert_includes File.read(path), 'version: 1.1.0+30'
+    assert_raises(FastlaneCore::Interface::FastlaneError) do
+      action.run(pubspec_path: path, build_number: 2_100_000_001)
+    end
   end
 
   def test_firebase_distribution_is_opt_in_and_uses_app_configuration
