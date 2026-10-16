@@ -9,3 +9,6 @@ fastlane/.env.*
 *.jks
 *.keystore
 android/key.properties
+build/
+google-services.json
+*service-account*.json
