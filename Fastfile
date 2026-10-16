@@ -10,6 +10,7 @@ require_relative 'lib/codex_runner'
 require_relative 'lib/release_notes'
 require_relative 'lib/ios_signing'
 require_relative 'lib/release_workflow'
+require_relative 'actions/bump_pubspec_build'
 
 extend ReleaseNotes
 extend IosSigning
@@ -240,7 +241,7 @@ def release_plan(platforms, for_upload: true)
   plan[:commit] = Dir.chdir(project_root) { sh('git', 'rev-parse', 'HEAD', log: false).strip }
   platforms.each do |platform|
     name = "#{platform.to_s.upcase}_BUILD_NUMBER"
-    selected = positive_integer(name, required: for_upload) || current[:build_number]
+    selected = positive_integer(name, required: true)
     UI.user_error!("#{name} must not be below the pubspec build number.") if selected < current[:build_number]
     UI.user_error!('Google Play version codes must be below 2,100,000,001.') if platform == :android && selected > 2_100_000_000
     plan[:build_numbers][platform] = selected
@@ -452,6 +453,13 @@ lane :draft_release_notes do |options|
   UI.user_error!("Release notes already exist: #{path}") if File.exist?(path)
   generate_release_notes(path, ReleaseNotes::MAX_LENGTH)
   UI.success("Review and commit #{path} before release.")
+end
+
+desc 'Explicitly raise the pubspec build number; review and commit the result'
+lane :bump_build_version do |options|
+  ensure_clean_worktree
+  bump_pubspec_build(pubspec_path: File.join(project_root, 'pubspec.yaml'),
+                     build_number: options[:build_number])
 end
 
 desc 'Validate once, then deploy betas to TestFlight and Google Play'

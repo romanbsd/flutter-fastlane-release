@@ -30,6 +30,12 @@ requires a new version code across tracks. Add and commit
 numbers differ, provide both files. Notes are limited to 500 characters and
 must match committed bytes. `draft_release_notes build_number:<number>` can
 draft notes for review, but deployment never generates or commits them.
+Build-only lanes also require their platform's explicit build number, so no
+release artifact silently reuses the pubspec number. Check store uniqueness
+before a later upload; build-only lanes do not query the stores.
+`bump_build_version` is an explicit maintenance lane backed by the shared
+`bump_pubspec_build` action. It changes only pubspec and requires a subsequent
+review/commit; beta lanes never invoke it.
 
 Run `bundle exec fastlane beta_preflight`, then `bundle exec fastlane beta_all`
 for a combined release, or `ios beta` / `android beta` separately. The combined

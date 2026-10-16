@@ -64,6 +64,16 @@ class SharedReleaseCheck < Minitest::Test
     assert_raises(FastlaneCore::Interface::FastlaneError) { @fastfile.release_plan([:ios]) }
   end
 
+  def test_build_only_requires_its_own_explicit_build_number
+    ENV.delete('ANDROID_BUILD_NUMBER')
+    assert_raises(FastlaneCore::Interface::FastlaneError) do
+      @fastfile.release_plan([:android], for_upload: false)
+    end
+    ENV['ANDROID_BUILD_NUMBER'] = '31'
+    plan = @fastfile.release_plan([:android], for_upload: false)
+    assert_equal 31, plan[:build_numbers][:android]
+  end
+
   def test_missing_or_uncommitted_notes_fail_closed
     ENV['ANDROID_BUILD_NUMBER'] = '32'
     assert_raises(FastlaneCore::Interface::FastlaneError) { @fastfile.release_plan([:android]) }
@@ -89,6 +99,18 @@ class SharedReleaseCheck < Minitest::Test
     assert_raises(FastlaneCore::Interface::FastlaneError) do
       @fastfile.verify_existing_artifact!(artifact, platform: :ios, version: '1.1.0', build_number: 28, notes: notes)
     end
+  end
+
+  def test_explicit_shared_bump_action_only_changes_pubspec
+    path = File.join(@root, 'pubspec.yaml')
+    action = Fastlane::Actions::BumpPubspecBuildAction
+    assert_equal 27, action.run(pubspec_path: path)
+    assert_includes File.read(path), 'version: 1.1.0+27'
+    assert_raises(FastlaneCore::Interface::FastlaneError) do
+      action.run(pubspec_path: path, build_number: 27)
+    end
+    assert_equal 30, action.run(pubspec_path: path, build_number: 30)
+    assert_includes File.read(path), 'version: 1.1.0+30'
   end
 
   private
