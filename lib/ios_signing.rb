@@ -5,12 +5,23 @@ require 'plist'
 
 module IosSigning
   def ios_encryption_declaration
-    declaration = env_boolean('USES_NON_EXEMPT_ENCRYPTION', default: nil)
-    return declaration unless declaration.nil?
-
-    info = Plist.parse_xml(File.join(project_root, 'ios', 'Runner', 'Info.plist'))
-    declaration = info && info['ITSAppUsesNonExemptEncryption']
-    return declaration if [true, false].include?(declaration)
+    configured = env_boolean('USES_NON_EXEMPT_ENCRYPTION', default: nil)
+    info_path = File.join(project_root, 'ios', 'Runner', 'Info.plist')
+    FastlaneCore::UI.user_error!('ios/Runner/Info.plist is missing.') unless File.file?(info_path)
+    begin
+      info = Plist.parse_xml(info_path)
+    rescue StandardError => error
+      FastlaneCore::UI.user_error!("Read ios/Runner/Info.plist before declaring export compliance: #{error.message}")
+    end
+    FastlaneCore::UI.user_error!('ios/Runner/Info.plist could not be parsed.') unless info.is_a?(Hash)
+    embedded = info && info['ITSAppUsesNonExemptEncryption']
+    if [true, false].include?(embedded)
+      if !configured.nil? && configured != embedded
+        FastlaneCore::UI.user_error!('USES_NON_EXEMPT_ENCRYPTION conflicts with ITSAppUsesNonExemptEncryption in Info.plist.')
+      end
+      return embedded
+    end
+    return configured unless configured.nil?
 
     FastlaneCore::UI.user_error!('Declare export compliance with USES_NON_EXEMPT_ENCRYPTION or ITSAppUsesNonExemptEncryption in Info.plist.')
   end
@@ -52,7 +63,13 @@ module IosSigning
       flutter('build', 'ipa', '--release', "--export-options-plist=#{export_path}",
               *ios_build_args(build_number: build_number))
     ensure
-      File.binwrite(settings_path, original_settings)
+      restore_path = "#{settings_path}.fastlane-restore-#{Process.pid}"
+      begin
+        File.binwrite(restore_path, original_settings)
+        File.rename(restore_path, settings_path)
+      ensure
+        File.delete(restore_path) if File.exist?(restore_path)
+      end
     end
 
     build_artifact('build/ios/ipa/*.ipa', since: started_at)

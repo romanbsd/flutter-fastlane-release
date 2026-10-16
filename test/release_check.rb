@@ -25,6 +25,29 @@ class SharedReleaseCheck < Minitest::Test
     end
   end
 
+  def test_notes_runner_classifies_non_utf8_failures
+    Dir.mktmpdir('codex-runner-check-') do |root|
+      log = File.join(root, 'log.txt')
+      error = assert_raises(CodexRunner::Error) do
+        CodexRunner.run([Gem.ruby, '-e', 'STDOUT.binmode; STDOUT.write("\\xFFHTTP 401"); exit 1'],
+                        root: root, timeout: 5, log_path: log)
+      end
+      assert_match(/authentication failed/, error.message)
+    end
+  end
+
+  def test_ios_encryption_declaration_uses_embedded_value_and_rejects_conflict
+    info_path = File.join(@root, 'ios', 'Runner', 'Info.plist')
+    File.write(info_path, '<?xml version="1.0"?><plist version="1.0"><dict><key>ITSAppUsesNonExemptEncryption</key><false/></dict></plist>')
+    assert_equal false, @fastfile.ios_encryption_declaration
+    ENV['USES_NON_EXEMPT_ENCRYPTION'] = 'true'
+    error = assert_raises(FastlaneCore::Interface::FastlaneError) { @fastfile.ios_encryption_declaration }
+    assert_match(/conflicts/, error.message)
+    File.delete(info_path)
+    error = assert_raises(FastlaneCore::Interface::FastlaneError) { @fastfile.ios_encryption_declaration }
+    assert_match(/Info.plist is missing/, error.message)
+  end
+
   def setup
     @saved_env = ENV.to_h
     @root = Dir.mktmpdir('flutter-release-check-')

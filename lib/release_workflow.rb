@@ -75,7 +75,13 @@ module ReleaseWorkflow
       end
       raise
     ensure
-      write_release_status(plan, results)
+      primary_error = $!
+      begin
+        write_release_status(plan, results)
+      rescue StandardError => status_error
+        raise unless primary_error
+        FastlaneCore::UI.error("Could not update build/release/status.json after release failure: #{status_error.message}")
+      end
     end
     FastlaneCore::UI.success("Release #{plan[:version]} builds #{plan[:build_numbers]} uploaded; verify store review and tester availability. See build/release/status.json.")
   end

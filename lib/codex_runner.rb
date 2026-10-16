@@ -19,15 +19,18 @@ module CodexRunner
       child_env = ENV.to_h.select { |key, _| CHILD_ENV_KEYS.include?(key) }
       pid = Process.spawn(child_env, *command, chdir: root, out: log_path,
                          err: [:child, :out], pgroup: true, unsetenv_others: true)
-    rescue Errno::ENOENT => e
+    rescue Errno::ENOENT, Errno::EACCES, Errno::ENOEXEC, Errno::ENOTDIR => e
       raise Error, 'Codex working or log directory disappeared.' unless File.directory?(root) && File.directory?(File.dirname(log_path))
       raise Error, "Codex executable could not be started: #{e.message}. Install codex and authenticate it before generating release notes."
     end
     status = Timeout.timeout(timeout) { Process.wait2(pid).last }
     return if status.success?
 
-    log = File.read(log_path)
-    reason = if log.match?(/unauthorized|authentication (?:failed|required)|not logged in|401|invalid.api.key/i)
+    log = File.open(log_path, 'rb') do |file|
+      file.seek(-[file.size, 16_384].min, IO::SEEK_END)
+      file.read
+    end.force_encoding(Encoding::UTF_8).scrub
+    reason = if log.match?(/unauthorized|authentication (?:failed|required)|not logged in|HTTP\S*\s+401|status(?: code)?[:= ]+401|invalid.api.key/i)
                'authentication failed; authenticate the Codex CLI before retrying'
              else
                'execution/service failed; check Codex connectivity and CLI authentication'
@@ -50,9 +53,9 @@ module CodexRunner
     rescue Timeout::Error
       # The unreaped leader still reserves its PID: this is our process group.
       Process.kill('KILL', -pid)
-      Process.wait(pid)
+      Timeout.timeout(2) { Process.wait(pid) }
     end
-  rescue Errno::ESRCH, Errno::ECHILD
+  rescue Errno::ESRCH, Errno::ECHILD, Timeout::Error
     # Do not signal a PID/group once its child has exited or been reaped.
   end
 end
