@@ -1,7 +1,8 @@
 # frozen_string_literal: true
 
-require 'fileutils'
 require 'digest'
+require 'English'
+require 'fileutils'
 require 'json'
 require 'plist'
 require 'tmpdir'
@@ -60,10 +61,8 @@ end
 
 def verify_existing_artifact!(path, platform:, version:, build_number:, notes:, expected_sha: nil)
   actual = Digest::SHA256.file(path).hexdigest
-  receipt_path = File.join(project_root, 'build', 'release', 'status.json')
-  receipt = JSON.parse(File.read(receipt_path)) if File.file?(receipt_path)
-  recorded = receipt&.dig('platforms', platform.to_s)
-  matching_receipt = recorded && receipt['version'] == version &&
+  recorded = recorded_artifact_receipt(platform, version, build_number)
+  matching_receipt = recorded && recorded['version'] == version &&
                      recorded['build_number'].to_i == build_number.to_i &&
                      recorded['sha256'] == actual &&
                      recorded['notes_sha256'] == Digest::SHA256.hexdigest(notes)
@@ -73,6 +72,27 @@ def verify_existing_artifact!(path, platform:, version:, build_number:, notes:, 
     UI.user_error!("Artifact SHA-256 #{actual} differs from the expected #{expected_sha}.")
   end
   UI.message("Verified #{platform} #{version}+#{build_number}, SHA-256 #{actual}.")
+end
+
+# Receipts outlive a single run, so an artifact built by an earlier attempt can
+# still be uploaded. Older runs wrote their receipts into status.json.
+def recorded_artifact_receipt(platform, version, build_number)
+  entry = release_receipts[platform.to_s]
+  if entry.is_a?(Hash)
+    return entry if entry['sha256'] # legacy flat receipt
+
+    receipt = entry["#{version}+#{build_number}"]
+    return receipt if receipt
+  end
+
+  path = release_status_path
+  return nil unless File.file?(path)
+
+  status = JSON.parse(File.read(path))
+  return nil unless status.is_a?(Hash)
+
+  recorded = status.dig('platforms', platform.to_s)
+  recorded&.merge('version' => status['version'])
 rescue JSON::ParserError => error
   UI.user_error!("Invalid release status JSON: #{error.message}")
 end
@@ -163,6 +183,8 @@ def verify_artifact_identity!(path, platform:)
              aab_manifest_value(path, 'package')
            end
   UI.user_error!("Artifact app ID #{actual.inspect} does not match Appfile #{expected.inspect}.") unless actual == expected
+rescue FastlaneCore::Interface::FastlaneShellError, Errno::ENOENT
+  UI.user_error!('Cannot read artifact identity; inspect the IPA or AAB before retrying.')
 end
 
 def expected_app_identifier(field)
@@ -185,8 +207,33 @@ rescue ArgumentError => e
 end
 
 def prepare_release(plan)
+  # flutter clean removes build/, which holds receipts for artifacts still awaiting upload.
+  receipts = plan[:clean] ? release_receipts : {}
   flutter('clean') if plan[:clean]
+  write_json_atomically(release_receipts_path, receipts) unless receipts.empty?
   flutter('pub', 'get')
+  # Dependency resolution can rewrite the lockfile; never build inputs that no
+  # longer match the recorded commit.
+  ensure_release_inputs_committed
+  plan[:commit] = current_commit
+end
+
+def ensure_release_inputs_committed
+  %w[pubspec.yaml pubspec.lock].each do |file|
+    path = File.join(project_root, file)
+    next unless File.file?(path)
+
+    committed = Dir.chdir(project_root) do
+      IO.popen(['git', 'show', "HEAD:#{file}"], err: File::NULL, &:read)
+    end
+    next if committed == File.read(path)
+
+    UI.user_error!("#{file} changed during release preparation; commit or revert it before building.")
+  end
+end
+
+def current_commit
+  Dir.chdir(project_root) { sh('git', 'rev-parse', 'HEAD', log: false).strip }
 end
 
 def ensure_clean_worktree
@@ -251,6 +298,30 @@ rescue ArgumentError
   UI.user_error!('PLAY_STORE_ROLLOUT must be a number greater than 0 and no greater than 1.')
 end
 
+# supply updates metadata on an existing release, so target an explicit version when
+# configured and otherwise the track's latest release. Changelogs are only uploaded
+# for an explicit version to avoid publishing stale notes.
+def play_store_listing_options(metadata_path)
+  track = ENV.fetch('PLAY_STORE_LISTING_TRACK', 'production')
+  requested = positive_integer('PLAY_STORE_VERSION_CODE') ||
+              positive_integer('SUPPLY_VERSION_CODE', ENV['SUPPLY_VERSION_CODE'])
+  version_code = requested || google_play_track_version_codes(track: track).max
+  options = {
+    metadata_path: metadata_path,
+    track: track,
+    skip_upload_apk: true,
+    skip_upload_aab: true,
+    skip_upload_changelogs: requested.nil?,
+    skip_upload_metadata: false,
+    skip_upload_images: !env_boolean('PLAY_STORE_UPLOAD_IMAGES'),
+    skip_upload_screenshots: !env_boolean('PLAY_STORE_UPLOAD_SCREENSHOTS'),
+    sync_image_upload: true,
+    validate_only: env_boolean('PLAY_STORE_VALIDATE_ONLY')
+  }
+  options[:version_code] = version_code if version_code
+  options
+end
+
 def testflight_options(include_compliance: true, require_api_key: false)
   api_key_options = app_store_connect_api_key_options(required: require_api_key)
   groups = env_list('TESTFLIGHT_GROUPS')
@@ -275,17 +346,114 @@ def testflight_options(include_compliance: true, require_api_key: false)
   options
 end
 
-def release_plan(platforms, for_upload: true)
+def next_store_build(pubspec_build, store_latest)
+  chosen = [pubspec_build, store_latest].max
+  chosen <= store_latest ? chosen + 1 : chosen
+end
+
+def latest_play_version_code(track)
+  tracks = (%w[internal alpha beta production] + [track]).uniq
+  tracks.flat_map { |name| google_play_track_version_codes(track: name) }.max || 0
+end
+
+# Assigns the next store build when a platform number is omitted, raises pubspec to the
+# lowest build in this release, generates missing notes with Codex, and commits both.
+# With prepare: false it only computes and validates the numbers (preflight).
+def prepare_automatic_release(platforms, current, prepare: true)
+  missing = platforms.select { |platform| positive_integer("#{platform.to_s.upcase}_BUILD_NUMBER").nil? }
+  return {} if missing.empty?
+  if env_boolean('PLAY_STORE_VALIDATE_ONLY')
+    names = missing.map { |platform| "#{platform.to_s.upcase}_BUILD_NUMBER" }
+    UI.user_error!("#{names.join(' and ')} is required when PLAY_STORE_VALIDATE_ONLY is set.")
+  end
+
+  ensure_clean_worktree if prepare
+  latest = {}
+  if platforms.include?(:android)
+    latest[:android] = latest_play_version_code(play_store_options[:track])
+  end
+  if platforms.include?(:ios)
+    ios = testflight_options
+    latest[:ios] = latest_testflight_build_number(
+      version: current[:version], initial_build_number: 0, **ios.slice(:api_key_path)
+    )
+  end
+  # Validate every explicit number before anything is written or committed.
+  platforms.each do |platform|
+    name = "#{platform.to_s.upcase}_BUILD_NUMBER"
+    explicit = positive_integer(name)
+    next unless explicit
+
+    UI.user_error!("#{name} must not be below the pubspec build number.") if explicit < current[:build_number]
+    UI.user_error!('Google Play version codes must be below 2,100,000,001.') if platform == :android && explicit > 2_100_000_000
+    UI.user_error!("#{name} must exceed the build already on the store.") if explicit <= latest[platform].to_i
+  end
+  chosen = next_store_build(current[:build_number], latest.values.max || 0)
+  UI.user_error!('Google Play version codes must be below 2,100,000,001.') if platforms.include?(:android) && chosen > 2_100_000_000
+
+  numbers = missing.to_h { |platform| [platform, chosen] }
+  return numbers unless prepare
+
+  explicit = platforms.filter_map do |platform|
+    positive_integer("#{platform.to_s.upcase}_BUILD_NUMBER")
+  end
+  baseline = (explicit + numbers.values).min
+  version = current[:version]
+  notes_paths = (explicit + numbers.values).uniq.map do |build|
+    release_notes_path(version: version, build_number: build)
+  end
+  notes_paths.each do |path|
+    next if File.file?(path)
+
+    generate_release_notes(path, ReleaseNotes::MAX_LENGTH)
+  end
+  pubspec_path = File.join(project_root, 'pubspec.yaml')
+  pubspec_changed = false
+  if baseline > current[:build_number]
+    bump_pubspec_build(pubspec_path: pubspec_path, build_number: baseline)
+    pubspec_changed = true
+  end
+  message = if pubspec_changed
+              "Bump build to #{version}+#{baseline}."
+            else
+              "Add release notes for #{version}+#{numbers.values.min}."
+            end
+  commit_release_changes([pubspec_path, *notes_paths], message)
+  numbers
+end
+
+def commit_release_changes(paths, message)
+  root = File.realpath(project_root)
+  relative = paths.map do |path|
+    full = File.realpath(File.expand_path(path))
+    UI.user_error!("Release file is outside the repository: #{path}") unless full.start_with?("#{root}#{File::SEPARATOR}")
+    full.delete_prefix("#{root}#{File::SEPARATOR}")
+  end
+  Dir.chdir(root) do
+    add = IO.popen(['git', 'add', '--', *relative], err: [:child, :out], &:read)
+    UI.user_error!("Could not stage the release build and changelog.\n#{add}") unless $CHILD_STATUS.success?
+    IO.popen(['git', 'diff', '--quiet', 'HEAD', '--', *relative], err: [:child, :out], &:read)
+    return if $CHILD_STATUS.success?
+
+    # Pathspec commit: anything else the developer staged stays staged.
+    commit = IO.popen(['git', 'commit', '-m', message, '--', *relative], err: [:child, :out], &:read)
+    UI.user_error!("Could not commit the release build and changelog.\n#{commit}") unless $CHILD_STATUS.success?
+  end
+end
+
+def release_plan(platforms, for_upload: true, prepare: true)
+  current = pubspec_version
+  automatic = for_upload ? prepare_automatic_release(platforms, current, prepare: prepare) : {}
   current = pubspec_version
   plan = current.merge(
     build_numbers: {},
     clean: env_boolean('FLUTTER_CLEAN'),
     platforms: platforms
   )
-  plan[:commit] = Dir.chdir(project_root) { sh('git', 'rev-parse', 'HEAD', log: false).strip }
+  plan[:commit] = current_commit
   platforms.each do |platform|
     name = "#{platform.to_s.upcase}_BUILD_NUMBER"
-    selected = positive_integer(name, required: true)
+    selected = automatic[platform] || positive_integer(name, required: true)
     UI.user_error!("#{name} must not be below the pubspec build number.") if selected < current[:build_number]
     UI.user_error!('Google Play version codes must be below 2,100,000,001.') if platform == :android && selected > 2_100_000_000
     plan[:build_numbers][platform] = selected
@@ -297,14 +465,19 @@ def release_plan(platforms, for_upload: true)
     end
   end
   ensure_clean_worktree
+  # prepare_automatic_release has already generated and committed the notes for an
+  # automatic release; a plan-only run validates notes only where they must exist.
   if for_upload
-    plan[:android_notes] = release_notes(version: plan[:version], build_number: plan[:build_numbers][:android]) if platforms.include?(:android)
-    plan[:ios_notes] = release_notes(version: plan[:version], build_number: plan[:build_numbers][:ios]) if platforms.include?(:ios)
+    platforms.each do |platform|
+      next unless prepare || automatic[platform].nil?
+
+      notes = release_notes(version: plan[:version], build_number: plan[:build_numbers][platform])
+      platform == :ios ? plan[:ios_notes] = notes : plan[:android_notes] = notes
+    end
   end
   if platforms.include?(:android)
-    if for_upload
-      tracks = (%w[internal alpha beta production] + [plan[:android][:track]]).uniq
-      latest = tracks.flat_map { |track| google_play_track_version_codes(track: track) }.max || 0
+    if for_upload && automatic.empty?
+      latest = latest_play_version_code(plan[:android][:track])
       UI.user_error!('ANDROID_BUILD_NUMBER must exceed the version codes already on Play tracks.') if plan[:build_numbers][:android] <= latest
     end
     ensure_android_release_signing! if for_upload || !plan[:android][:validate_only]
@@ -315,14 +488,14 @@ def release_plan(platforms, for_upload: true)
     plan[:ios] = for_upload ? testflight_options : app_store_connect_api_key_options
     plan[:team_id] = required_env('APPLE_TEAM_ID')
     positive_integer('APP_STORE_ID')
-    if for_upload
+    if for_upload && automatic.empty?
       latest = latest_testflight_build_number(version: plan[:version], initial_build_number: 0,
                                               **plan[:ios].slice(:api_key_path))
       UI.user_error!('IOS_BUILD_NUMBER must exceed the latest uploaded iOS build.') if plan[:build_numbers][:ios] <= latest
     end
   end
-  if for_upload
-    plan[:ios][:changelog] = plan[:ios_notes] if platforms.include?(:ios)
+  if platforms.include?(:ios) && plan[:ios_notes]
+    plan[:ios][:changelog] = plan[:ios_notes]
   end
   plan
 end
@@ -356,7 +529,8 @@ def existing_testflight_encryption(version, build_number, api_options)
   previous_token = Spaceship::ConnectAPI.token
   begin
     Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.from_json_file(path)
-    identifier = CredentialsManager::AppfileConfig.try_fetch_value(:app_identifier)
+    identifier = expected_app_identifier(:app_identifier)
+    FastlaneCore::UI.user_error!('Appfile app_identifier is required to redistribute a TestFlight build.') if identifier.empty?
     app = Spaceship::ConnectAPI::App.find(identifier)
     UI.user_error!("App Store Connect app not found: #{identifier}") unless app
     build = Spaceship::ConnectAPI::Build.all(app_id: app.id, version: version,
@@ -379,19 +553,27 @@ def firebase_app_id(platform)
   if platform == :ios
     path = ENV['GOOGLESERVICE_INFO_PLIST_PATH'].to_s.strip
     path = File.join(project_root, 'ios/Runner/GoogleService-Info.plist') if path.empty?
-    value = Plist.parse_xml(path)&.fetch('GOOGLE_APP_ID', nil)
+    path = File.expand_path(path, project_root)
+    value = begin
+      parsed = Plist.parse_xml(path)
+      parsed.is_a?(Hash) ? parsed['GOOGLE_APP_ID'] : nil
+    rescue StandardError => error
+      UI.user_error!("Cannot read iOS Firebase configuration #{path}: #{error.message}")
+    end
   else
     path = File.join(project_root, 'android/app/google-services.json')
-    value = JSON.parse(File.read(path)).dig('client', 0, 'client_info', 'mobilesdk_app_id')
+    value = begin
+      JSON.parse(File.read(path)).dig('client', 0, 'client_info', 'mobilesdk_app_id')
+    rescue StandardError => error
+      UI.user_error!("Cannot read Android Firebase configuration #{path}: #{error.message}")
+    end
   end
   UI.user_error!("Missing #{platform} Firebase app ID in #{path}.") if value.to_s.empty?
   value
-rescue Errno::ENOENT, JSON::ParserError
-  UI.user_error!("Cannot read #{platform} Firebase configuration: #{path}.")
 end
 
 platform :ios do
-  desc 'Build an App Store-signed IPA and upload it to TestFlight'
+  desc 'Assign the next TestFlight build, commit pubspec and Codex notes, then upload'
   lane :beta do
     run_beta_release([:ios])
   end
@@ -439,10 +621,12 @@ platform :ios do
     build_number = positive_integer('APP_STORE_BUILD_NUMBER', required: true).to_s
     api_key_options = app_store_connect_api_key_options
     notes = release_notes(version: version, build_number: build_number)
+    locale = ENV.fetch('APP_STORE_NOTES_LOCALE', 'en-US').to_s.strip
+    UI.user_error!('APP_STORE_NOTES_LOCALE must not be empty.') if locale.empty?
     # deliver applies release_type during its metadata phase. Include only the
     # Codex-authored release notes and preserve other console-managed text.
     Dir.mktmpdir('flutter-app-store-') do |metadata_path|
-      locale_path = File.join(metadata_path, 'en-US')
+      locale_path = File.join(metadata_path, locale)
       FileUtils.mkdir_p(locale_path)
       File.write(File.join(locale_path, 'release_notes.txt'), notes)
       upload_to_app_store(
@@ -464,10 +648,8 @@ platform :ios do
     plan = release_plan([:ios], for_upload: false)
     notes = release_notes(version: plan[:version], build_number: plan[:build_numbers][:ios])
     prepare_release(plan)
-    match(type: 'adhoc', readonly: true, **plan[:ios].slice(:api_key_path))
-    started_at = Time.now
-    flutter('build', 'ipa', '--release', *ios_build_args(build_number: plan[:build_numbers][:ios]))
-    ipa = build_artifact('build/ios/ipa/*.ipa', since: started_at)
+    ipa = build_signed_ios_adhoc_ipa(plan[:ios].slice(:api_key_path), plan[:team_id],
+                                    plan[:build_numbers][:ios])
     firebase_app_distribution(app: firebase_app_id(:ios), ipa_path: ipa,
                               groups: ENV.fetch('FIREBASE_IOS_GROUPS', 'beta-testers'),
                               release_notes: notes)
@@ -475,7 +657,7 @@ platform :ios do
 end
 
 platform :android do
-  desc 'Build an Android App Bundle and upload it to a Google Play testing track'
+  desc 'Assign the next Play build, commit pubspec and Codex notes, then upload'
   lane :beta do
     run_beta_release([:android])
   end
@@ -511,18 +693,7 @@ platform :android do
     metadata_path = File.join(project_root, 'fastlane', 'metadata', 'android')
     UI.user_error!("Play Store metadata not found at #{metadata_path}") unless Dir.exist?(metadata_path)
 
-    upload_to_play_store(
-      metadata_path: metadata_path,
-      track: ENV.fetch('PLAY_STORE_LISTING_TRACK', 'production'),
-      skip_upload_apk: true,
-      skip_upload_aab: true,
-      skip_upload_changelogs: false,
-      skip_upload_metadata: false,
-      skip_upload_images: !env_boolean('PLAY_STORE_UPLOAD_IMAGES'),
-      skip_upload_screenshots: !env_boolean('PLAY_STORE_UPLOAD_SCREENSHOTS'),
-      sync_image_upload: true,
-      validate_only: env_boolean('PLAY_STORE_VALIDATE_ONLY')
-    )
+    upload_to_play_store(**play_store_listing_options(metadata_path))
   end
 
   desc 'Build a signed APK and distribute it through Firebase when enabled'
@@ -546,10 +717,10 @@ lane :test do
   flutter('test')
 end
 
-desc 'Check release numbers, notes, signing, source state and live store versions'
+desc 'Check release numbers, signing, source state and live store versions without writing'
 lane :beta_preflight do
-  plan = release_plan(%i[ios android])
-  UI.success("Ready for iOS #{plan[:version]}+#{plan[:build_numbers][:ios]} and Android #{plan[:version]}+#{plan[:build_numbers][:android]}.")
+  plan = release_plan(%i[ios android], prepare: false)
+  UI.success("Ready for iOS #{plan[:version]}+#{plan[:build_numbers][:ios]} and Android #{plan[:version]}+#{plan[:build_numbers][:android]}. Run beta_all to build and upload them.")
 end
 
 desc 'Draft user-facing notes for an app-owned build; review and commit before release'

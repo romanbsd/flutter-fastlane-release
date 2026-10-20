@@ -1,6 +1,8 @@
 .DS_Store
 .bundle/
 vendor/bundle/
+.ruby-lsp/
+.serena/
 *.gem
 fastlane/.env
 fastlane/.env.*

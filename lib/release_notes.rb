@@ -10,7 +10,12 @@ module ReleaseNotes
   def release_notes_path(version:, build_number:)
     configured = ENV['RELEASE_NOTES_FILE'].to_s.strip
     default_path = File.join('fastlane', 'release_notes', "#{version}+#{build_number}.txt")
-    File.expand_path(configured.empty? ? default_path : configured, project_root)
+    path = File.expand_path(configured.empty? ? default_path : configured, project_root)
+    root = File.expand_path(project_root)
+    unless path.start_with?(root + File::SEPARATOR)
+      FastlaneCore::UI.user_error!("Release notes must be inside the application repository: #{path}")
+    end
+    path
   end
 
   def release_notes(version:, build_number:)

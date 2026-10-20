@@ -28,15 +28,66 @@ module IosSigning
 
   def build_signed_ios_ipa(api_key_options, team_id, build_number)
     ensure_ios_toolchain!
+    build_signed_ios_artifact(api_key_options, team_id, build_number,
+                              match_type: 'appstore', export_method: nil)
+  end
+
+  # Firebase distribution needs an Ad Hoc export. Flutter's default export
+  # method is app-store, so the method has to be requested explicitly.
+  def build_signed_ios_adhoc_ipa(api_key_options, team_id, build_number)
+    build_signed_ios_artifact(api_key_options, team_id, build_number,
+                              match_type: 'adhoc', export_method: 'ad-hoc')
+  end
+
+  def build_signed_ios_artifact(api_key_options, team_id, build_number, match_type:, export_method:)
     started_at = Time.now
     setup_ci if is_ci
-    identifier = CredentialsManager::AppfileConfig.try_fetch_value(:app_identifier)
-    match(type: 'appstore', readonly: true, app_identifier: identifier, team_id: team_id, **api_key_options)
+    identifier = expected_app_identifier(:app_identifier)
+    FastlaneCore::UI.user_error!('Appfile app_identifier is required for iOS builds.') if identifier.empty?
+    match(type: match_type, readonly: true, app_identifier: identifier, team_id: team_id, **api_key_options)
     profiles = lane_context[Fastlane::Actions::SharedValues::MATCH_PROVISIONING_PROFILE_MAPPING]
     profile = profiles && profiles[identifier]
-    FastlaneCore::UI.user_error!('match did not provide an App Store provisioning profile for the app.') if profile.to_s.empty?
+    FastlaneCore::UI.user_error!("match did not provide a #{match_type} provisioning profile for the app.") if profile.to_s.empty?
 
-    # Flutter builds the archive as well as the IPA. Configure both signing phases.
+    project_path = File.join(project_root, 'ios', 'Runner.xcodeproj')
+    settings_path = File.join(project_path, 'project.pbxproj')
+    unless File.file?(settings_path)
+      FastlaneCore::UI.user_error!("Xcode project not found: #{settings_path}")
+    end
+    export_args = if export_method
+                    ['--export-method', export_method]
+                  else
+                    ["--export-options-plist=#{write_ios_export_options(profiles, team_id)}"]
+                  end
+
+    original_settings = File.binread(settings_path)
+    # Keep an on-disk copy first: a killed process cannot run the ensure block.
+    backup_path = "#{settings_path}.fastlane-backup"
+    File.binwrite(backup_path, original_settings)
+
+    build_error = nil
+    begin
+      update_code_signing_settings(
+        path: project_path, use_automatic_signing: false,
+        targets: ['Runner'], build_configurations: ['Release'],
+        sdk: 'iphoneos*',
+        team_id: team_id, bundle_identifier: identifier,
+        code_sign_identity: 'Apple Distribution', profile_name: profile
+      )
+      flutter('build', 'ipa', '--release', *export_args, *ios_build_args(build_number: build_number))
+    rescue StandardError => error
+      build_error = error
+      raise
+    ensure
+      restore_ios_project_settings(settings_path, original_settings, backup_path, build_error)
+    end
+
+    build_artifact('build/ios/ipa/*.ipa', since: started_at)
+  end
+
+  # Flutter reads the export method from the plist, so it must not be combined
+  # with --export-method.
+  def write_ios_export_options(profiles, team_id)
     export_path = File.join(project_root, 'build', 'ios', 'fastlane', 'ExportOptions.plist')
     FileUtils.mkdir_p(File.dirname(export_path))
     File.write(export_path, Plist::Emit.dump({
@@ -49,37 +100,17 @@ module IosSigning
       'manageAppVersionAndBuildNumber' => false,
       'uploadSymbols' => true
     }))
+    export_path
+  end
 
-    project_path = File.join(project_root, 'ios', 'Runner.xcodeproj')
-    settings_path = File.join(project_path, 'project.pbxproj')
-    original_settings = File.binread(settings_path)
-    build_error = nil
+  def restore_ios_project_settings(settings_path, original_settings, backup_path, build_error)
     begin
-      update_code_signing_settings(
-        path: project_path, use_automatic_signing: false,
-        targets: ['Runner'], build_configurations: ['Release'],
-        sdk: 'iphoneos*',
-        team_id: team_id, bundle_identifier: identifier,
-        code_sign_identity: 'Apple Distribution', profile_name: profile
-      )
-      flutter('build', 'ipa', '--release', "--export-options-plist=#{export_path}",
-              *ios_build_args(build_number: build_number))
-    rescue StandardError => error
-      build_error = error
-      raise
-    ensure
-      restore_path = "#{settings_path}.fastlane-restore-#{Process.pid}"
-      begin
-        File.binwrite(restore_path, original_settings)
-        File.rename(restore_path, settings_path)
-      rescue StandardError => restore_error
-        raise unless build_error
-        FastlaneCore::UI.error("Could not restore project.pbxproj after iOS build failure: #{restore_error.message}")
-      ensure
-        FileUtils.rm_f(restore_path) rescue nil
-      end
+      File.binwrite(settings_path, original_settings)
+    rescue StandardError => restore_error
+      raise unless build_error
+      FastlaneCore::UI.error("Could not restore project.pbxproj after iOS build failure: #{restore_error.message}. The original file is at #{backup_path}.")
+      return
     end
-
-    build_artifact('build/ios/ipa/*.ipa', since: started_at)
+    FileUtils.rm_f(backup_path)
   end
 end

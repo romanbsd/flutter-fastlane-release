@@ -23,33 +23,45 @@ Keep a root `Gemfile` and lockfile with Fastlane, an app-specific
 
 ## Beta release
 
-Set `IOS_BUILD_NUMBER` and `ANDROID_BUILD_NUMBER` independently, each above the
-corresponding live store number and at least the pubspec build. Google Play
-requires a new version code across tracks. Add and commit
-`fastlane/release_notes/<version>+<build>.txt` for each selected number. If the
-numbers differ, provide both files. Notes are limited to 500 characters and
-must match committed bytes. `draft_release_notes build_number:<number>` can
-draft notes for review, but deployment never generates or commits them.
-Build-only lanes also require their platform's explicit build number, so no
-release artifact silently reuses the pubspec number. Check store uniqueness
-before a later upload; build-only lanes do not query the stores.
-`bump_build_version` is an explicit maintenance lane backed by the shared
-`bump_pubspec_build` action. It changes only pubspec and requires a subsequent
-review/commit; beta lanes never invoke it.
+An upload lane with no `IOS_BUILD_NUMBER` or `ANDROID_BUILD_NUMBER` assigns the
+next build itself: one above the latest build already on the stores being
+shipped, and never below the pubspec build. The lane writes it to `pubspec.yaml`,
+asks Codex for any missing `fastlane/release_notes/<version>+<build>.txt`, and
+commits the pubspec change and changelog before building. Notes are limited to
+500 characters. The Codex CLI must be installed and authenticated; generation is
+bounded by `CODEX_NOTES_TIMEOUT_SECONDS` (default 300). Set a platform build
+number only to reuse a specific build; that override must already exceed the
+store. Notes must already be committed when every platform number is explicit; a
+mixed release generates missing notes for the override.
+`PLAY_STORE_VALIDATE_ONLY` does not change the repository, so it still requires
+the platform build number. Run one release at a time: two concurrent runs can
+assign the same build.
+Build-only lanes also require their platform's explicit build number and do not
+query the stores or edit pubspec. `bump_build_version` remains available when
+you want to raise the pubspec build without deploying. `draft_release_notes`
+can still draft notes for a chosen build without committing them.
 
 Run `bundle exec fastlane beta_preflight`, then `bundle exec fastlane beta_all`
-for a combined release, or `ios beta` / `android beta` separately. The combined
-lane analyzes/tests, builds both artifacts, then uploads. It records artifact
-hashes and per-platform upload outcomes in `build/release/status.json`. An
-upload interruption can leave an unknown store outcome: check the store before
-retrying. `ios upload ipa:<path>` and `android upload aab:<path>` require a
-matching local receipt or an explicit `sha256:<digest>`; they read the embedded
-version/build and use the matching committed notes.
+for a combined release, or `ios beta` / `android beta` separately. Preflight only
+computes and validates the next numbers (stores, signing, toolchain, notes for
+explicit releases); it does not write or commit, and `beta_all` assigns the
+numbers again. The combined lane analyzes/tests, builds both artifacts, then
+uploads. It records the latest run in `build/release/status.json` and keeps
+per-artifact receipts keyed by version and build in
+`build/release/receipts.json`, so a receipt survives a later attempt that fails
+before building. An upload interruption can leave an unknown store outcome:
+check the store before retrying. `ios upload ipa:<path>` and
+`android upload aab:<path>` require a matching receipt or an explicit
+`sha256:<digest>`; they read the embedded version/build and use the matching
+committed notes.
 
 Android beta accepts only `internal`, `alpha`, or `beta` via
 `PLAY_STORE_BETA_TRACK`. `PLAY_STORE_VALIDATE_ONLY=true` validates an Android
-Play edit without releasing it. TestFlight distribution uses
-`TESTFLIGHT_GROUPS` and `TESTFLIGHT_DISTRIBUTE_EXTERNAL`.
+Play edit without releasing it. `android store_listing` uploads Play metadata
+and optional images only; it targets `PLAY_STORE_VERSION_CODE` (or
+`SUPPLY_VERSION_CODE`) and otherwise the latest release on the track. Changelogs
+are uploaded only for an explicit version code. TestFlight distribution
+uses `TESTFLIGHT_GROUPS` and `TESTFLIGHT_DISTRIBUTE_EXTERNAL`.
 For external TestFlight testing, also provide the app-specific
 `TESTFLIGHT_BETA_APP_DESCRIPTION` and `TESTFLIGHT_BETA_APP_FEEDBACK_EMAIL`,
 and complete beta review contact/demo-account details in App Store Connect.
@@ -58,16 +70,23 @@ The current App Store upload minimum is Xcode 26 with an iOS 26 SDK, and
 Google Play updates must target Android API 36 or later. Verify current store
 requirements before each release. iOS signing uses
 read-only `match`; `APPLE_TEAM_ID` and pre-provisioned signing assets are
-required. `APP_STORE_CONNECT_API_KEY_PATH` is required in CI. App Store review
+required. Manual signing settings are applied to the `Runner` target only; apps
+with extension targets keep their own signing configuration in the Xcode
+project. The original `project.pbxproj` is backed up as
+`project.pbxproj.fastlane-backup` before signing changes and removed after a
+successful restore; if a run is killed, restore it manually.
+`APP_STORE_CONNECT_API_KEY_PATH` is required in CI. App Store review
 submission is a separate `ios release` lane, enabled by the app's
 `IOS_RELEASE_MODE=app_store_submission` setting; it selects an existing build
-and manual release after approval.
+and manual release after approval. Notes are written for `APP_STORE_NOTES_LOCALE`
+(default `en-US`).
 Apps that previously used `ios release` for TestFlight can set
 `IOS_RELEASE_MODE=testflight_alias`; `ANDROID_RELEASE_MODE=beta_alias` likewise
 retains an Android beta alias. `ENABLE_FIREBASE_DISTRIBUTION=true` enables
 `ios firebase_beta` and `android firebase_beta`; they require the app's Firebase
 config, explicit platform build number, committed notes, and Fastlane Firebase
-plugin. App Store submission and Firebase distribution remain opt-in.
+plugin. `ios firebase_beta` builds an Ad Hoc export so testers can install the
+IPA directly. App Store submission and Firebase distribution remain opt-in.
 
 ## Verification and upgrades
 

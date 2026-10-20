@@ -7,13 +7,55 @@ require 'securerandom'
 require 'time'
 
 module ReleaseWorkflow
+  def release_status_path
+    File.join(project_root, 'build', 'release', 'status.json')
+  end
+
+  # Run status is overwritten by every release attempt; receipts outlive a run so
+  # an artifact built earlier can still be uploaded after a later attempt fails.
+  def release_receipts_path
+    File.join(project_root, 'build', 'release', 'receipts.json')
+  end
+
   def write_release_status(plan, results)
-    path = File.join(project_root, 'build', 'release', 'status.json')
-    FileUtils.mkdir_p(File.dirname(path))
     payload = plan.slice(:run_id, :started_at, :state, :phase, :version, :build_numbers, :commit)
     payload[:updated_at] = Time.now.utc.iso8601
     payload[:platforms] = results
-    temporary_path = "#{path}.#{plan[:run_id]}.tmp"
+    write_json_atomically(release_status_path, payload)
+  end
+
+  def release_receipts
+    path = release_receipts_path
+    return {} unless File.file?(path)
+
+    parsed = JSON.parse(File.read(path))
+    parsed.is_a?(Hash) ? parsed : {}
+  rescue JSON::ParserError => error
+    FastlaneCore::UI.user_error!("Invalid release receipts JSON: #{error.message}")
+  end
+
+  def record_artifact_receipt(plan, platform, result)
+    receipts = release_receipts
+    platform_receipts = receipts[platform.to_s]
+    # A legacy flat receipt (no per-version keys) is replaced by the keyed schema.
+    unless platform_receipts.is_a?(Hash) && !platform_receipts.key?('sha256')
+      platform_receipts = {}
+    end
+    platform_receipts["#{plan[:version]}+#{result[:build_number]}"] = {
+      'run_id' => plan[:run_id],
+      'version' => plan[:version],
+      'build_number' => result[:build_number],
+      'sha256' => result[:sha256],
+      'notes_sha256' => result[:notes_sha256],
+      'recorded_at' => Time.now.utc.iso8601
+    }
+    receipts[platform.to_s] = platform_receipts
+    write_json_atomically(release_receipts_path, receipts)
+  end
+
+  def write_json_atomically(path, payload)
+    FileUtils.mkdir_p(File.dirname(path))
+    temporary_path = "#{path}.#{SecureRandom.uuid}.tmp"
     begin
       File.write(temporary_path, JSON.pretty_generate(payload))
       File.rename(temporary_path, path)
@@ -43,6 +85,7 @@ module ReleaseWorkflow
       plan[:phase] = 'building'
       platforms.each do |platform|
         results[platform][:status] = 'building'
+        write_release_status(plan, results)
         artifact = if platform == :ios
                      build_signed_ios_ipa(plan[:ios].slice(:api_key_path), plan[:team_id], plan[:build_numbers][:ios])
                    else
@@ -52,6 +95,7 @@ module ReleaseWorkflow
                               sha256: Digest::SHA256.file(artifact).hexdigest,
                               notes_sha256: Digest::SHA256.hexdigest(platform == :ios ? plan[:ios_notes] : plan[:android_notes]),
                               build_number: plan[:build_numbers][platform] }
+        record_artifact_receipt(plan, platform, results[platform])
         write_release_status(plan, results)
       end
       plan[:phase] = 'uploading'
@@ -84,6 +128,7 @@ module ReleaseWorkflow
         FastlaneCore::UI.error("Could not update build/release/status.json after release failure: #{status_error.message}")
       end
     end
-    FastlaneCore::UI.success("Release #{plan[:version]} builds #{plan[:build_numbers]} uploaded; verify store review and tester availability. See build/release/status.json.")
+    summary = results.map { |platform, result| "#{platform}: #{result[:status]}" }.join(', ')
+    FastlaneCore::UI.success("Release #{plan[:version]} finished (#{summary}). Verify store review and tester availability. See build/release/status.json.")
   end
 end
