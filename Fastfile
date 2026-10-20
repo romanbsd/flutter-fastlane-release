@@ -12,6 +12,7 @@ require_relative 'lib/release_git'
 require_relative 'lib/release_numbers'
 require_relative 'lib/release_notes'
 require_relative 'lib/ios_signing'
+require_relative 'lib/release_tags'
 require_relative 'lib/release_workflow'
 require_relative 'actions/bump_pubspec_build'
 
@@ -383,7 +384,7 @@ def explicit_build_numbers(platforms)
   end.compact
 end
 
-def latest_store_builds(platforms, current)
+def latest_store_builds(platforms, version:)
   latest = {}
   if platforms.include?(:android)
     latest[:android] = latest_play_version_code(play_store_options[:track])
@@ -391,10 +392,24 @@ def latest_store_builds(platforms, current)
   if platforms.include?(:ios)
     ios = testflight_options
     latest[:ios] = latest_testflight_build_number(
-      version: current[:version], initial_build_number: 0, **ios.slice(:api_key_path)
+      version: version, initial_build_number: 0, **ios.slice(:api_key_path)
     )
   end
   latest
+end
+
+def release_version_for(current_version, bump)
+  requested = bump.to_s.strip
+  requested = ENV['VERSION_BUMP'].to_s.strip if requested.empty?
+  return current_version if requested.empty?
+
+  part = requested.downcase
+  unless %w[major minor patch].include?(part)
+    UI.user_error!("Version bump must be major, minor, or patch (got #{requested.inspect}).")
+  end
+  PubspecVersion.next_version(current_version, part)
+rescue ArgumentError => error
+  UI.user_error!(error.message)
 end
 
 def validate_explicit_numbers!(explicit, latest, current)
@@ -409,28 +424,34 @@ end
 # Assigns the next store build when a platform number is omitted, raises pubspec to the
 # lowest build in this release, generates missing notes with Codex, and commits both.
 # With prepare: false it only computes and validates the numbers (preflight).
-def prepare_automatic_release(platforms, current, prepare: true)
+def prepare_automatic_release(platforms, current, version:, prepare: true)
   explicit = explicit_build_numbers(platforms)
   missing = platforms - explicit.keys
-  return {} if missing.empty?
-  if env_boolean('PLAY_STORE_VALIDATE_ONLY')
+  bumping = version != current[:version]
+  if !missing.empty? && env_boolean('PLAY_STORE_VALIDATE_ONLY')
     names = missing.map { |platform| "#{platform.to_s.upcase}_BUILD_NUMBER" }
     UI.user_error!("#{names.join(' and ')} is required when PLAY_STORE_VALIDATE_ONLY is set.")
   end
 
   ensure_clean_worktree if prepare
-  latest = latest_store_builds(platforms, current)
+  latest = latest_store_builds(platforms, version: version)
   # Validate every explicit number before anything is written or committed.
   validate_explicit_numbers!(explicit, latest, current)
   chosen = ReleaseNumbers.next_store_build(current[:build_number], latest.values.max || 0)
-  ReleaseNumbers.validate_play_version_code!(chosen) if platforms.include?(:android)
+  ReleaseNumbers.validate_play_version_code!(chosen) if missing.include?(:android)
+  numbers = explicit.merge(missing.to_h { |platform| [platform, chosen] })
 
-  numbers = missing.to_h { |platform| [platform, chosen] }
+  # Reusing a build requires committed notes. A version bump starts a new
+  # changelog, so the notes for it are generated instead.
+  unless bumping
+    explicit.each_value do |build|
+      release_notes(version: version, build_number: build)
+    end
+  end
   return numbers unless prepare
+  return numbers if env_boolean('PLAY_STORE_VALIDATE_ONLY')
 
-  baseline = (explicit.values + numbers.values).min
-  version = current[:version]
-  notes_paths = (explicit.values + numbers.values).uniq.map do |build|
+  notes_paths = numbers.values.uniq.map do |build|
     release_notes_path(version: version, build_number: build)
   end
   notes_paths.each do |path|
@@ -438,16 +459,18 @@ def prepare_automatic_release(platforms, current, prepare: true)
 
     generate_release_notes(path, ReleaseNotes::MAX_LENGTH)
   end
+  baseline = numbers.values.min
   pubspec_path = File.join(project_root, 'pubspec.yaml')
-  pubspec_changed = false
-  if baseline > current[:build_number]
-    bump_pubspec_build(pubspec_path: pubspec_path, build_number: baseline)
-    pubspec_changed = true
+  changed = bumping || baseline > current[:build_number]
+  if changed
+    File.write(pubspec_path, PubspecVersion.rewrite(current[:content], version: version, build: baseline))
   end
-  message = if pubspec_changed
+  message = if bumping
+              "Release #{version}+#{baseline}."
+            elsif changed
               "Bump build to #{version}+#{baseline}."
             else
-              "Add release notes for #{version}+#{numbers.values.min}."
+              "Add release notes for #{version}+#{numbers.values.max}."
             end
   commit_release_changes([pubspec_path, *notes_paths], message)
   numbers
@@ -465,11 +488,16 @@ rescue ReleaseGit::Error => error
   UI.user_error!(error.message)
 end
 
-def release_plan(platforms, for_upload: true, prepare: true)
+def release_plan(platforms, for_upload: true, prepare: true, bump: nil)
   current = pubspec_version
-  automatic = for_upload ? prepare_automatic_release(platforms, current, prepare: prepare) : {}
+  version = for_upload ? release_version_for(current[:version], bump) : current[:version]
+  if version != current[:version] && env_boolean('PLAY_STORE_VALIDATE_ONLY')
+    UI.user_error!('Version bumps cannot be combined with PLAY_STORE_VALIDATE_ONLY.')
+  end
+  automatic = for_upload ? prepare_automatic_release(platforms, current, version: version, prepare: prepare) : {}
   current = pubspec_version
   plan = current.merge(
+    version: version,
     build_numbers: {},
     clean: env_boolean('FLUTTER_CLEAN'),
     platforms: platforms
@@ -490,10 +518,6 @@ def release_plan(platforms, for_upload: true, prepare: true)
   end
   ensure_clean_worktree
   if platforms.include?(:android)
-    if for_upload && automatic.empty?
-      latest = latest_play_version_code(plan[:android][:track])
-      UI.user_error!('ANDROID_BUILD_NUMBER must exceed the version codes already on Play tracks.') if plan[:build_numbers][:android] <= latest
-    end
     ensure_android_release_signing! if for_upload || !plan[:android][:validate_only]
   end
   if platforms.include?(:ios)
@@ -502,22 +526,15 @@ def release_plan(platforms, for_upload: true, prepare: true)
     plan[:ios] = for_upload ? testflight_options : app_store_connect_api_key_options
     plan[:team_id] = required_env('APPLE_TEAM_ID')
     positive_integer('APP_STORE_ID')
-    if for_upload && automatic.empty?
-      latest = latest_testflight_build_number(version: plan[:version], initial_build_number: 0,
-                                              **plan[:ios].slice(:api_key_path))
-      UI.user_error!('IOS_BUILD_NUMBER must exceed the latest uploaded iOS build.') if plan[:build_numbers][:ios] <= latest
-    end
   end
-  load_release_notes!(plan, platforms, automatic, prepare: prepare) if for_upload
+  load_release_notes!(plan, platforms) if for_upload && prepare
   plan
 end
 
-# prepare_automatic_release has already generated and committed the notes for an
-# automatic release; a plan-only run validates notes only where they must exist.
-def load_release_notes!(plan, platforms, automatic, prepare:)
+# prepare_automatic_release already generated and committed the notes for an
+# automatic release, and validated the notes of explicit builds.
+def load_release_notes!(plan, platforms)
   platforms.each do |platform|
-    next unless prepare || automatic[platform].nil?
-
     notes = release_notes(version: plan[:version], build_number: plan[:build_numbers][platform])
     platform == :ios ? plan[:ios_notes] = notes : plan[:android_notes] = notes
   end
@@ -637,10 +654,21 @@ def verify_existing_upload!(path, platform, expected_sha)
   [metadata, notes]
 end
 
+def tag_release!(version)
+  tag = ReleaseTags.create(project_root, version)
+  if tag
+    UI.success("Tagged release #{tag}. Push it with: git push origin #{tag}")
+  else
+    UI.message("No release tag for #{version}: not a new major.minor.patch version or already tagged.")
+  end
+rescue ReleaseGit::Error => error
+  UI.user_error!("Could not tag release #{version}: #{error.message}")
+end
+
 platform :ios do
   desc 'Assign the next TestFlight build, commit pubspec and Codex notes, then upload'
-  lane :beta do
-    run_beta_release([:ios])
+  lane :beta do |options|
+    run_beta_release([:ios], bump: options[:bump])
   end
 
   desc 'Build a signed IPA without uploading or changing pubspec'
@@ -668,9 +696,9 @@ platform :ios do
   end
 
   desc 'Submit a tested TestFlight build for App Review with manual release after approval'
-  lane :release do
+  lane :release do |options|
     if ENV['IOS_RELEASE_MODE'] == 'testflight_alias'
-      run_beta_release([:ios])
+      run_beta_release([:ios], bump: options[:bump])
       next
     end
     UI.user_error!('App Store submission is disabled for this app.') unless ENV['IOS_RELEASE_MODE'] == 'app_store_submission'
@@ -707,14 +735,14 @@ end
 
 platform :android do
   desc 'Assign the next Play build, commit pubspec and Codex notes, then upload'
-  lane :beta do
-    run_beta_release([:android])
+  lane :beta do |options|
+    run_beta_release([:android], bump: options[:bump])
   end
 
   desc 'Compatibility alias for the configured Google Play beta track'
-  lane :release do
+  lane :release do |options|
     UI.user_error!('Android release alias is disabled for this app.') unless ENV['ANDROID_RELEASE_MODE'] == 'beta_alias'
-    run_beta_release([:android])
+    run_beta_release([:android], bump: options[:bump])
   end
 
   desc 'Build an Android App Bundle without uploading or changing pubspec'
@@ -750,8 +778,8 @@ lane :test do
 end
 
 desc 'Check release numbers, signing, source state and live store versions without writing'
-lane :beta_preflight do
-  plan = release_plan(%i[ios android], prepare: false)
+lane :beta_preflight do |options|
+  plan = release_plan(%i[ios android], prepare: false, bump: options[:bump])
   UI.success("Ready for iOS #{plan[:version]}+#{plan[:build_numbers][:ios]} and Android #{plan[:version]}+#{plan[:build_numbers][:android]}. Run beta_all to build and upload them.")
 end
 
@@ -773,8 +801,8 @@ lane :bump_build_version do |options|
 end
 
 desc 'Validate once, then deploy betas to TestFlight and Google Play'
-lane :beta_all do
-  run_beta_release(%i[ios android], run_checks: true)
+lane :beta_all do |options|
+  run_beta_release(%i[ios android], run_checks: true, bump: options[:bump])
 end
 
 error do |lane, exception|

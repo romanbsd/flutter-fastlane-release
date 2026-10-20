@@ -10,6 +10,7 @@ require 'tmpdir'
 require_relative '../lib/codex_runner'
 require_relative '../lib/release_git'
 require_relative '../lib/release_numbers'
+require_relative '../lib/release_tags'
 
 Fastlane.load_actions
 
@@ -95,7 +96,8 @@ class SharedReleaseCheck < Minitest::Test
     assert_equal 'iOS changes', plan[:ios][:changelog]
     assert_equal 'Android changes', plan[:android_notes]
     assert_equal git_stdout('rev-parse', 'HEAD').strip, plan[:commit]
-    assert_includes File.read(File.join(@root, 'pubspec.yaml')), 'version: 1.1.0+26'
+    assert_includes File.read(File.join(@root, 'pubspec.yaml')), 'version: 1.1.0+28'
+    assert_equal 'Bump build to 1.1.0+28.', git_stdout('log', '-1', '--format=%s').strip
   end
 
   def test_release_plan_bumps_pubspec_and_commits_existing_notes
@@ -126,11 +128,11 @@ class SharedReleaseCheck < Minitest::Test
   def test_store_number_checks_fail_before_build
     ENV['ANDROID_BUILD_NUMBER'] = '30'
     error = assert_raises(FastlaneCore::Interface::FastlaneError) { @fastfile.release_plan([:android]) }
-    assert_match(/must exceed.*Play tracks/, error.message)
+    assert_match(/must exceed the build already on the store/, error.message)
     ENV['ANDROID_BUILD_NUMBER'] = '31'
     ENV['IOS_BUILD_NUMBER'] = '27'
     error = assert_raises(FastlaneCore::Interface::FastlaneError) { @fastfile.release_plan([:ios]) }
-    assert_match(/must exceed.*iOS build/, error.message)
+    assert_match(/must exceed the build already on the store/, error.message)
   end
 
   def test_build_only_requires_its_own_explicit_build_number
@@ -400,6 +402,100 @@ class SharedReleaseCheck < Minitest::Test
     assert_equal "v2\n", git_stdout('show', ':app.txt')
   end
 
+  def test_version_bump_helpers
+    assert_equal '1.1.1', PubspecVersion.next_version('1.1.0', 'patch')
+    assert_equal '1.2.0', PubspecVersion.next_version('1.1.0', 'minor')
+    assert_equal '2.0.0', PubspecVersion.next_version('1.1.0', 'major')
+    assert_equal '1.2.0', PubspecVersion.next_version('1.1.0-beta', 'minor')
+    assert_raises(ArgumentError) { PubspecVersion.next_version('1.1.0', 'huge') }
+  end
+
+  def test_plan_only_previews_version_bump_without_writing
+    ENV.delete('ANDROID_BUILD_NUMBER')
+    commits_before = git_stdout('rev-list', '--count', 'HEAD').to_i
+
+    plan = @fastfile.release_plan([:android], prepare: false, bump: 'minor')
+
+    assert_equal '1.2.0', plan[:version]
+    assert_equal 31, plan[:build_numbers][:android]
+    assert_includes File.read(File.join(@root, 'pubspec.yaml')), 'version: 1.1.0+26'
+    assert_equal commits_before, git_stdout('rev-list', '--count', 'HEAD').to_i
+  end
+
+  def test_release_bumps_version_and_generates_notes_for_it
+    ENV.delete('ANDROID_BUILD_NUMBER')
+    @fastfile.define_singleton_method(:generate_release_notes) do |path, _max|
+      File.write(path, "Minor release.\n")
+    end
+
+    plan = @fastfile.release_plan([:android], bump: 'minor')
+
+    assert_equal '1.2.0', plan[:version]
+    assert_equal 31, plan[:build_numbers][:android]
+    assert_includes File.read(File.join(@root, 'pubspec.yaml')), 'version: 1.2.0+31'
+    assert_equal 'Release 1.2.0+31.', git_stdout('log', '-1', '--format=%s').strip
+    assert_equal "Minor release.\n", git_stdout('show', 'HEAD:fastlane/release_notes/1.2.0+31.txt')
+  end
+
+  def test_unknown_version_bump_is_rejected
+    ENV.delete('ANDROID_BUILD_NUMBER')
+
+    error = assert_raises(FastlaneCore::Interface::FastlaneError) do
+      @fastfile.release_plan([:android], bump: 'huge')
+    end
+    assert_match(/major, minor, or patch/, error.message)
+  end
+
+  def test_release_tags_only_new_versions
+    assert_equal 'v1.1.0', ReleaseTags.create(@root, '1.1.0')
+    assert_nil ReleaseTags.create(@root, '1.1.0')
+    assert_nil ReleaseTags.create(@root, '1.1.0-beta')
+    assert_equal 'v1.1.1', ReleaseTags.create(@root, '1.1.1')
+    assert_nil ReleaseTags.create(@root, '1.1.0')
+    assert_equal %w[v1.1.0 v1.1.1], git_stdout('tag', '--list', 'v*').lines.map(&:strip).sort
+  end
+
+  def test_successful_release_creates_version_tag
+    ipa = write('build/ios/ipa/fixture.ipa', 'ipa bytes')
+    @fastfile.define_singleton_method(:prepare_release) { |_plan| nil }
+    @fastfile.define_singleton_method(:build_signed_ios_ipa) { |*_args| ipa }
+    @fastfile.define_singleton_method(:upload_to_testflight) { |**_options| true }
+
+    @fastfile.run_beta_release([:ios])
+
+    assert_equal 'v1.1.0', git_stdout('tag', '--list', 'v1.1.0').strip
+
+    @fastfile.run_beta_release([:ios])
+
+    assert_equal 'v1.1.0', git_stdout('tag', '--list', 'v1.1.0').strip
+  end
+
+  def test_validate_only_does_not_change_the_repository
+    ENV['PLAY_STORE_VALIDATE_ONLY'] = 'true'
+    commits_before = git_stdout('rev-list', '--count', 'HEAD').to_i
+
+    plan = @fastfile.release_plan([:android])
+
+    assert_equal 31, plan[:build_numbers][:android]
+    assert_includes File.read(File.join(@root, 'pubspec.yaml')), 'version: 1.1.0+26'
+    assert_equal commits_before, git_stdout('rev-list', '--count', 'HEAD').to_i
+  end
+
+  def test_version_bump_is_rejected_for_validate_only_and_build_only
+    ENV['PLAY_STORE_VALIDATE_ONLY'] = 'true'
+    ENV.delete('ANDROID_BUILD_NUMBER')
+    error = assert_raises(FastlaneCore::Interface::FastlaneError) do
+      @fastfile.release_plan([:android], bump: 'patch')
+    end
+    assert_match(/cannot be combined with PLAY_STORE_VALIDATE_ONLY/, error.message)
+
+    ENV.delete('PLAY_STORE_VALIDATE_ONLY')
+    ENV['VERSION_BUMP'] = 'minor'
+    ENV['ANDROID_BUILD_NUMBER'] = '31'
+    plan = @fastfile.release_plan([:android], for_upload: false)
+    assert_equal '1.1.0', plan[:version]
+  end
+
   def test_receipts_keep_older_builds
     artifact = write('build/ios/ipa/fixture.ipa', 'ipa bytes')
     notes = @fastfile.release_notes(version: '1.1.0', build_number: 28)
@@ -503,7 +599,7 @@ class SharedReleaseCheck < Minitest::Test
   end
 
   def test_status_write_failure_preserves_original_release_error
-    @fastfile.define_singleton_method(:release_plan) { |_platforms| raise 'original release failure' }
+    @fastfile.define_singleton_method(:release_plan) { |_platforms, **_options| raise 'original release failure' }
     @fastfile.define_singleton_method(:write_release_status) do |plan, _results|
       raise 'status write failure' if plan[:state] == 'failed'
     end

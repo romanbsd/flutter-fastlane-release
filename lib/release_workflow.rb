@@ -64,7 +64,7 @@ module ReleaseWorkflow
     end
   end
 
-  def run_beta_release(platforms, run_checks: false)
+  def run_beta_release(platforms, run_checks: false, bump: nil)
     plan = {
       run_id: SecureRandom.uuid, started_at: Time.now.utc.iso8601,
       state: 'running', phase: 'preflight'
@@ -73,7 +73,7 @@ module ReleaseWorkflow
     release_error = nil
     begin
       write_release_status(plan, results)
-      plan.merge!(release_plan(platforms))
+      plan.merge!(release_plan(platforms, bump: bump))
       plan[:phase] = 'preparing'
       write_release_status(plan, results)
       prepare_release(plan)
@@ -110,6 +110,9 @@ module ReleaseWorkflow
         results[platform][:status] = platform == :android && plan[:android][:validate_only] ? 'validated' : 'uploaded'
         write_release_status(plan, results)
       end
+      plan[:phase] = 'tagging'
+      write_release_status(plan, results)
+      tag_release!(plan[:version]) unless plan.dig(:android, :validate_only)
       plan[:state] = 'succeeded'
       plan[:phase] = 'complete'
     rescue StandardError => error

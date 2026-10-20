@@ -25,17 +25,33 @@ Keep a root `Gemfile` and lockfile with Fastlane, an app-specific
 
 An upload lane with no `IOS_BUILD_NUMBER` or `ANDROID_BUILD_NUMBER` assigns the
 next build itself: one above the latest build already on the stores being
-shipped, and never below the pubspec build. The lane writes it to `pubspec.yaml`,
-asks Codex for any missing `fastlane/release_notes/<version>+<build>.txt`, and
-commits the pubspec change and changelog before building. Notes are limited to
-500 characters. The Codex CLI must be installed and authenticated; generation is
-bounded by `CODEX_NOTES_TIMEOUT_SECONDS` (default 300). Set a platform build
-number only to reuse a specific build; that override must already exceed the
-store. Notes must already be committed when every platform number is explicit; a
-mixed release generates missing notes for the override.
-`PLAY_STORE_VALIDATE_ONLY` does not change the repository, so it still requires
-the platform build number. Run one release at a time: two concurrent runs can
-assign the same build.
+shipped, and never below the pubspec build. The lane writes the selected build
+to `pubspec.yaml` (also when both numbers are explicit), asks Codex for any
+missing `fastlane/release_notes/<version>+<build>.txt`, and commits the pubspec
+change and changelog before building. Notes are limited to 500 characters. The
+Codex CLI must be installed and authenticated; generation is bounded by
+`CODEX_NOTES_TIMEOUT_SECONDS` (default 300). Set a platform build number only to
+reuse a specific build; that override must already exceed the store. Notes must
+already be committed when every platform number is explicit; a mixed release
+generates missing notes for the override. `PLAY_STORE_VALIDATE_ONLY` does not
+change the repository, so it still requires the platform build number. Run one
+release at a time: two concurrent runs can assign the same build.
+
+Bump the version as part of the release with the `bump:` option, or set
+`VERSION_BUMP`:
+
+```sh
+bundle exec fastlane beta_all bump:minor
+VERSION_BUMP=patch bundle exec fastlane ios beta
+```
+
+`major` resets minor and patch to zero, `minor` resets patch, and any
+pre-release suffix is dropped. A version bump generates notes for the new
+version. Build-only lanes never bump the pubspec and never tag. After a
+successful upload of a new major.minor.patch version the lane creates a local
+`vX.Y.Z` git tag; build-only changes inside the same version are not tagged, and
+`PLAY_STORE_VALIDATE_ONLY` runs never tag. Push tags explicitly with
+`git push origin vX.Y.Z` (or `git push --tags`).
 Build-only lanes also require their platform's explicit build number and do not
 query the stores or edit pubspec. `bump_build_version` remains available when
 you want to raise the pubspec build without deploying. `draft_release_notes`
@@ -44,13 +60,13 @@ can still draft notes for a chosen build without committing them.
 Run `bundle exec fastlane beta_preflight`, then `bundle exec fastlane beta_all`
 for a combined release, or `ios beta` / `android beta` separately. Preflight only
 computes and validates the next numbers (stores, signing, toolchain, notes for
-explicit releases); it does not write or commit, and `beta_all` assigns the
-numbers again. The combined lane analyzes/tests, builds both artifacts, then
-uploads. It records the latest run in `build/release/status.json` and keeps
-per-artifact receipts keyed by version and build in
-`build/release/receipts.json`, so a receipt survives a later attempt that fails
-before building. An upload interruption can leave an unknown store outcome:
-check the store before retrying. `ios upload ipa:<path>` and
+explicit releases); it does not write or commit, previews `bump:` in its output,
+and `beta_all` assigns the numbers again. The combined lane analyzes/tests,
+builds both artifacts, then uploads. It records the latest run in
+`build/release/status.json` and keeps per-artifact receipts keyed by version and
+build in `build/release/receipts.json`, so a receipt survives a later attempt
+that fails before building. An upload interruption can leave an unknown store
+outcome: check the store before retrying. `ios upload ipa:<path>` and
 `android upload aab:<path>` require a matching receipt or an explicit
 `sha256:<digest>`; they read the embedded version/build and use the matching
 committed notes.
