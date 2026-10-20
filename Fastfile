@@ -666,7 +666,7 @@ rescue ReleaseGit::Error => error
 end
 
 platform :ios do
-  desc 'Assign the next TestFlight build, commit pubspec and Codex notes, then upload'
+  desc 'Assign the next TestFlight build, optionally bump the version, commit pubspec and notes, then upload'
   lane :beta do |options|
     run_beta_release([:ios], bump: options[:bump])
   end
@@ -734,7 +734,7 @@ platform :ios do
 end
 
 platform :android do
-  desc 'Assign the next Play build, commit pubspec and Codex notes, then upload'
+  desc 'Assign the next Play build, optionally bump the version, commit pubspec and notes, then upload'
   lane :beta do |options|
     run_beta_release([:android], bump: options[:bump])
   end
@@ -777,7 +777,7 @@ lane :test do
   flutter('test')
 end
 
-desc 'Check release numbers, signing, source state and live store versions without writing'
+desc 'Check release numbers, signing, source state and live store versions without writing; previews a version bump'
 lane :beta_preflight do |options|
   plan = release_plan(%i[ios android], prepare: false, bump: options[:bump])
   UI.success("Ready for iOS #{plan[:version]}+#{plan[:build_numbers][:ios]} and Android #{plan[:version]}+#{plan[:build_numbers][:android]}. Run beta_all to build and upload them.")
@@ -800,7 +800,7 @@ lane :bump_build_version do |options|
                      build_number: options[:build_number])
 end
 
-desc 'Validate once, then deploy betas to TestFlight and Google Play'
+desc 'Validate once, then deploy betas to TestFlight and Google Play, optionally bumping the version'
 lane :beta_all do |options|
   run_beta_release(%i[ios android], run_checks: true, bump: options[:bump])
 end
