@@ -3,6 +3,7 @@
 require 'fileutils'
 require 'tmpdir'
 require_relative 'codex_runner'
+require_relative 'release_git'
 
 module ReleaseNotes
   MAX_LENGTH = 500
@@ -19,20 +20,18 @@ module ReleaseNotes
   end
 
   def release_notes(version:, build_number:)
-    max_length = MAX_LENGTH
     path = release_notes_path(version: version, build_number: build_number)
     FastlaneCore::UI.user_error!("Release notes missing: #{path}. Create and commit them before deployment.") unless File.file?(path)
     path = File.realpath(path)
-    notes = File.read(path).strip
+    content = File.read(path)
+    notes = content.strip
     FastlaneCore::UI.user_error!('Release notes must not be empty.') if notes.empty?
-    FastlaneCore::UI.user_error!("Release notes exceed #{max_length} characters; shorten them.") if notes.length > max_length
+    FastlaneCore::UI.user_error!("Release notes exceed #{MAX_LENGTH} characters; shorten them.") if notes.length > MAX_LENGTH
     root = File.realpath(project_root)
     FastlaneCore::UI.user_error!('Release notes must be inside the application repository.') unless path.start_with?(root + File::SEPARATOR)
     relative = path.delete_prefix(root + File::SEPARATOR)
-    committed = Dir.chdir(root) do
-      IO.popen(['git', 'show', "HEAD:#{relative}"], err: File::NULL, &:read)
-    end
-    FastlaneCore::UI.user_error!("Release notes must be committed: #{path}") unless committed == File.read(path)
+    committed = ReleaseGit.head_bytes(root, relative)
+    FastlaneCore::UI.user_error!("Release notes must be committed: #{path}") unless committed == content
     notes
   end
 
@@ -42,16 +41,16 @@ module ReleaseNotes
     include_baseline = false
     if from.empty?
       begin
-        from = Dir.chdir(project_root) { sh('git', 'describe', '--tags', '--abbrev=0', 'HEAD', log: false).strip }
-      rescue FastlaneCore::Interface::FastlaneShellError
-        from = Dir.chdir(project_root) { sh('git', 'rev-list', '--max-parents=0', 'HEAD', log: false).lines.first.to_s.strip }
+        from = git_output('describe', '--tags', '--abbrev=0', 'HEAD').strip
+      rescue ReleaseGit::Error
+        from = git_output('rev-list', '--max-parents=0', 'HEAD').lines.first.to_s.strip
         include_baseline = true
       end
     end
     to = ENV['RELEASE_NOTES_TO'].to_s.strip
     to = 'HEAD' if to.empty?
     revisions = [from, to].map do |revision|
-      Dir.chdir(project_root) { sh('git', 'rev-parse', '--verify', '--end-of-options', "#{revision}^{commit}", log: false).strip }
+      git_output('rev-parse', '--verify', '--end-of-options', "#{revision}^{commit}").strip
     end
     prompt = <<~PROMPT
       Write the English user-facing release changelog for this Flutter app.
@@ -90,5 +89,9 @@ module ReleaseNotes
     CodexRunner.run(command, root: project_root, timeout: timeout, log_path: log_path)
   rescue CodexRunner::Error => e
     FastlaneCore::UI.user_error!(e.message)
+  end
+
+  def git_output(*arguments)
+    ReleaseGit.output(project_root, 'git', *arguments)
   end
 end

@@ -8,6 +8,8 @@ require 'minitest/autorun'
 require 'plist'
 require 'tmpdir'
 require_relative '../lib/codex_runner'
+require_relative '../lib/release_git'
+require_relative '../lib/release_numbers'
 
 Fastlane.load_actions
 
@@ -63,10 +65,10 @@ class SharedReleaseCheck < Minitest::Test
     FileUtils.mkdir_p(File.join(@root, 'ios/Runner'))
     write('ios/Runner/Info.plist', '<?xml version="1.0"?><plist version="1.0"><dict/></plist>')
     write('ios/Runner/GoogleService-Info.plist', '<?xml version="1.0"?><plist version="1.0"><dict><key>GOOGLE_APP_ID</key><string>ios-fixture</string></dict></plist>')
-    system('git', '-C', @root, 'init', '-q', exception: true)
-    system('git', '-C', @root, 'add', '.', exception: true)
-    system('git', '-C', @root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test',
-           '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture', exception: true)
+    git!('init', '-q')
+    configure_git_identity
+    git!('add', '.')
+    git!('commit', '-qm', 'fixture')
     ENV['IOS_BUILD_NUMBER'] = '28'
     ENV['ANDROID_BUILD_NUMBER'] = '31'
     ENV['APPLE_TEAM_ID'] = 'TEAM'
@@ -79,11 +81,7 @@ class SharedReleaseCheck < Minitest::Test
     @fastfile.define_singleton_method(:ensure_git_status_clean) { |**_| true }
     @fastfile.define_singleton_method(:is_ci) { false }
     @fastfile.define_singleton_method(:ensure_ios_toolchain!) { true }
-    @fastfile.define_singleton_method(:sh) do |*args, **_|
-      args.first == 'git' ? "fixture-commit\n" : ''
-    end
-    @fastfile.define_singleton_method(:latest_testflight_build_number) { |**_| 27 }
-    @fastfile.define_singleton_method(:google_play_track_version_codes) { |**_| [30] }
+    stub_store_latest
   end
 
   def teardown
@@ -96,13 +94,12 @@ class SharedReleaseCheck < Minitest::Test
     assert_equal({ ios: 28, android: 31 }, plan[:build_numbers])
     assert_equal 'iOS changes', plan[:ios][:changelog]
     assert_equal 'Android changes', plan[:android_notes]
-    assert_equal 'fixture-commit', plan[:commit]
+    assert_equal git_stdout('rev-parse', 'HEAD').strip, plan[:commit]
     assert_includes File.read(File.join(@root, 'pubspec.yaml')), 'version: 1.1.0+26'
   end
 
   def test_release_plan_bumps_pubspec_and_commits_existing_notes
     ENV.delete('ANDROID_BUILD_NUMBER')
-    configure_git_identity
     called = false
     @fastfile.define_singleton_method(:generate_release_notes) { |*_args| called = true }
     plan = @fastfile.release_plan([:android])
@@ -116,7 +113,6 @@ class SharedReleaseCheck < Minitest::Test
 
   def test_release_plan_generates_missing_notes_and_commits_them
     ENV.delete('ANDROID_BUILD_NUMBER')
-    configure_git_identity
     File.delete(File.join(@root, 'fastlane/release_notes/1.1.0+31.txt'))
     @fastfile.define_singleton_method(:generate_release_notes) do |path, _max|
       File.write(path, "Fixed the Android startup hang.\n")
@@ -197,16 +193,63 @@ class SharedReleaseCheck < Minitest::Test
 
   def test_existing_artifact_must_match_appfile_identity
     @fastfile.define_singleton_method(:expected_app_identifier) { |_field| 'org.example.fixture' }
-    @fastfile.define_singleton_method(:get_ipa_info_plist_value) do |ipa:, key:|
-      key == 'DTPlatformName' ? 'iphoneos' : 'org.example.other'
+    metadata = { version: '1.1.0', build_number: 28, identifier: 'org.example.other', device: 'iphoneos' }
+
+    error = assert_raises(FastlaneCore::Interface::FastlaneError) do
+      @fastfile.verify_artifact_identity!(metadata, platform: :ios)
     end
+    assert_match(/does not match Appfile/, error.message)
     assert_raises(FastlaneCore::Interface::FastlaneError) do
-      @fastfile.verify_artifact_identity!('fixture.ipa', platform: :ios)
+      @fastfile.verify_artifact_identity!(metadata, platform: :android)
     end
-    @fastfile.define_singleton_method(:aab_manifest_value) { |_path, _attribute| 'org.example.other' }
-    assert_raises(FastlaneCore::Interface::FastlaneError) do
-      @fastfile.verify_artifact_identity!('fixture.aab', platform: :android)
+    error = assert_raises(FastlaneCore::Interface::FastlaneError) do
+      @fastfile.verify_artifact_identity!(metadata.merge(device: 'iphonesimulator'), platform: :ios)
     end
+    assert_match(/not an iPhoneOS device build/, error.message)
+  end
+
+  def test_artifact_metadata_reads_ipa_fields_in_one_pass
+    reads = 0
+    original = FastlaneCore::IpaFileAnalyser.method(:fetch_info_plist_file)
+    FastlaneCore::IpaFileAnalyser.define_singleton_method(:fetch_info_plist_file) do |_ipa|
+      reads += 1
+      { 'CFBundleShortVersionString' => '1.1.0', 'CFBundleVersion' => '28',
+        'CFBundleIdentifier' => 'org.example.fixture', 'DTPlatformName' => 'iphoneos',
+        'ITSAppUsesNonExemptEncryption' => false }
+    end
+
+    metadata = @fastfile.artifact_metadata('fixture.ipa', :ios)
+
+    assert_equal 1, reads
+    assert_equal({ version: '1.1.0', build_number: 28, identifier: 'org.example.fixture',
+                   device: 'iphoneos', encryption: false }, metadata)
+  ensure
+    FastlaneCore::IpaFileAnalyser.define_singleton_method(:fetch_info_plist_file, original)
+  end
+
+  def test_artifact_metadata_parses_aab_manifest
+    manifest = '<?xml version="1.0" encoding="utf-8"?>' \
+               '<manifest xmlns:android="http://schemas.android.com/apk/res/android" ' \
+               'package="org.example.fixture" android:versionName="1.1.0" android:versionCode="31"/>'
+    @fastfile.define_singleton_method(:aab_manifest) { |_path| manifest }
+
+    metadata = @fastfile.artifact_metadata('fixture.aab', :android)
+
+    assert_equal '1.1.0', metadata[:version]
+    assert_equal 31, metadata[:build_number]
+    assert_equal 'org.example.fixture', metadata[:identifier]
+  end
+
+  def test_artifact_metadata_rejects_invalid_versions
+    @fastfile.define_singleton_method(:aab_manifest) do |_path|
+      '<manifest xmlns:android="http://schemas.android.com/apk/res/android" ' \
+        'package="org.example.fixture" android:versionName="not-a-version" android:versionCode="31"/>'
+    end
+
+    error = assert_raises(FastlaneCore::Interface::FastlaneError) do
+      @fastfile.artifact_metadata('fixture.aab', :android)
+    end
+    assert_match(/no valid version name/, error.message)
   end
 
   def test_explicit_shared_bump_action_only_changes_pubspec
@@ -309,15 +352,14 @@ class SharedReleaseCheck < Minitest::Test
   end
 
   def test_next_store_build_uses_the_next_unused_number
-    assert_equal 31, @fastfile.next_store_build(26, 30)
-    assert_equal 31, @fastfile.next_store_build(30, 30)
-    assert_equal 35, @fastfile.next_store_build(35, 30)
+    assert_equal 31, ReleaseNumbers.next_store_build(26, 30)
+    assert_equal 31, ReleaseNumbers.next_store_build(30, 30)
+    assert_equal 35, ReleaseNumbers.next_store_build(35, 30)
   end
 
   def test_plan_only_release_does_not_write_or_commit
     ENV.delete('IOS_BUILD_NUMBER')
     ENV.delete('ANDROID_BUILD_NUMBER')
-    configure_git_identity
     @fastfile.define_singleton_method(:generate_release_notes) do |*_args|
       raise 'notes must not be generated by a plan-only run'
     end
@@ -333,7 +375,6 @@ class SharedReleaseCheck < Minitest::Test
 
   def test_automatic_release_reuses_the_committed_build_on_retry
     ENV.delete('ANDROID_BUILD_NUMBER')
-    configure_git_identity
 
     first = @fastfile.release_plan([:android])
     second = @fastfile.release_plan([:android])
@@ -345,12 +386,11 @@ class SharedReleaseCheck < Minitest::Test
   end
 
   def test_release_commit_leaves_unrelated_staged_changes_alone
-    configure_git_identity
     write('app.txt', "v1\n")
-    system('git', '-C', @root, 'add', 'app.txt', exception: true)
-    system('git', '-C', @root, '-c', 'commit.gpgsign=false', 'commit', '-qm', 'add app', exception: true)
+    git!('add', 'app.txt')
+    git!('commit', '-qm', 'add app')
     write('app.txt', "v2\n")
-    system('git', '-C', @root, 'add', 'app.txt', exception: true)
+    git!('add', 'app.txt')
     write('pubspec.yaml', "name: fixture\nversion: 1.1.0+32\n")
 
     @fastfile.commit_release_changes([File.join(@root, 'pubspec.yaml')], 'Bump build to 1.1.0+32.')
@@ -381,7 +421,7 @@ class SharedReleaseCheck < Minitest::Test
   def test_store_listing_targets_latest_release_and_skips_changelogs
     ENV.delete('PLAY_STORE_VERSION_CODE')
     ENV.delete('SUPPLY_VERSION_CODE')
-    @fastfile.define_singleton_method(:google_play_track_version_codes) { |**_options| [40, 41] }
+    stub_store_latest(android: [40, 41])
 
     options = @fastfile.play_store_listing_options('/tmp/metadata')
 
@@ -413,8 +453,7 @@ class SharedReleaseCheck < Minitest::Test
   end
 
   def test_ios_firebase_build_requests_adhoc_export
-    write('ios/Runner.xcodeproj/project.pbxproj', 'fixture project')
-    stub_signing
+    stub_ios_project
     calls = []
     @fastfile.define_singleton_method(:flutter) { |*args| calls << args }
 
@@ -427,8 +466,7 @@ class SharedReleaseCheck < Minitest::Test
   end
 
   def test_ios_app_store_build_writes_export_options
-    write('ios/Runner.xcodeproj/project.pbxproj', 'fixture project')
-    stub_signing
+    stub_ios_project
     @fastfile.define_singleton_method(:ensure_ios_toolchain!) { true }
     calls = []
     @fastfile.define_singleton_method(:flutter) { |*args| calls << args }
@@ -451,16 +489,11 @@ class SharedReleaseCheck < Minitest::Test
     assert_match(/inside the application repository/, error.message)
   end
 
-  def test_artifact_identity_reports_unreadable_ipa
-    @fastfile.define_singleton_method(:expected_app_identifier) { |_field| 'org.example.fixture' }
-    @fastfile.define_singleton_method(:get_ipa_info_plist_value) do |**_options|
-      raise Errno::ENOENT
-    end
-
+  def test_artifact_metadata_reports_unreadable_ipa
     error = assert_raises(FastlaneCore::Interface::FastlaneError) do
-      @fastfile.verify_artifact_identity!('missing.ipa', platform: :ios)
+      @fastfile.artifact_metadata(File.join(@root, 'missing.ipa'), :ios)
     end
-    assert_match(/Cannot read artifact identity/, error.message)
+    assert_match(/Cannot read IPA metadata/, error.message)
   end
 
   def test_ios_firebase_config_path_is_relative_to_the_project
@@ -489,7 +522,16 @@ class SharedReleaseCheck < Minitest::Test
     end
     @fastfile.define_singleton_method(:update_code_signing_settings) { |**_options| true }
     @fastfile.define_singleton_method(:build_artifact) { |*_args, **_options| 'fixture.ipa' }
-    @fastfile.define_singleton_method(:is_ci) { false }
+  end
+
+  def stub_ios_project
+    write('ios/Runner.xcodeproj/project.pbxproj', 'fixture project')
+    stub_signing
+  end
+
+  def stub_store_latest(android: [30], ios: 27)
+    @fastfile.define_singleton_method(:google_play_track_version_codes) { |**_options| Array(android) }
+    @fastfile.define_singleton_method(:latest_testflight_build_number) { |**_options| ios }
   end
 
   def write(path, content)
@@ -499,13 +541,20 @@ class SharedReleaseCheck < Minitest::Test
     full
   end
 
+  def git!(*args)
+    system('git', '-C', @root, *args, exception: true)
+  end
+
   def configure_git_identity
-    system('git', '-C', @root, 'config', 'user.name', 'Fixture', exception: true)
-    system('git', '-C', @root, 'config', 'user.email', 'fixture@example.test', exception: true)
-    system('git', '-C', @root, 'config', 'commit.gpgsign', 'false', exception: true)
+    git!('config', 'user.name', 'Fixture')
+    git!('config', 'user.email', 'fixture@example.test')
+    git!('config', 'commit.gpgsign', 'false')
   end
 
   def git_stdout(*args)
-    IO.popen(['git', '-C', @root, *args], &:read)
+    output, success = ReleaseGit.capture(@root, 'git', *args)
+    raise "git #{args.join(' ')} failed: #{output}" unless success
+
+    output
   end
 end

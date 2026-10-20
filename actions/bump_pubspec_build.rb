@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative '../lib/pubspec_version'
+require_relative '../lib/release_numbers'
 
 module Fastlane
   module Actions
@@ -18,7 +19,7 @@ module Fastlane
         selected = params[:build_number] || current[:build_number] + 1
         UI.user_error!('build_number must be a positive integer.') unless selected.to_s.match?(/\A\d+\z/) && selected.to_i.positive?
         UI.user_error!('build_number must increase the pubspec build number.') unless selected.to_i > current[:build_number]
-        UI.user_error!('build_number must not exceed the Google Play version-code limit of 2,100,000,000.') if selected.to_i > 2_100_000_000
+        ReleaseNumbers.validate_play_version_code!(selected)
         updated = current[:content].sub(PubspecVersion::PATTERN) do
           "version: #{Regexp.last_match[:version]}+#{selected}"
         end
