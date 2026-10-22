@@ -130,7 +130,16 @@ Apple's beta review before testers can install them.
 
 The current App Store upload minimum is Xcode 26 with an iOS 26 SDK, and Google
 Play updates must target Android API 36 or later; verify current store
-requirements before each release. iOS signing uses read-only `match`;
+requirements before each release. Android release builds need
+`android/key.properties` (`storeFile`, `storePassword`, `keyAlias`,
+`keyPassword`) or `ANDROID_KEYSTORE_PATH`, `ANDROID_KEYSTORE_PASSWORD`,
+`ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`. The app Gradle `release`
+build type has to use that keystore. A Flutter template that leaves
+`signingConfig signingConfigs.debug` still produces a debug-signed bundle
+after the credential check passes. `storeFile` is resolved by the app's Gradle
+file, commonly from `android/app`.
+
+iOS signing uses read-only `match`;
 `APPLE_TEAM_ID` and pre-provisioned signing assets are required. Manual signing
 settings are applied to the `Runner` target only, so apps with extension targets
 keep their own signing configuration in the Xcode project. The original
