@@ -8,6 +8,7 @@ require 'minitest/autorun'
 require 'plist'
 require 'tmpdir'
 require_relative '../lib/codex_runner'
+require_relative '../lib/flutter_project_root'
 require_relative '../lib/release_git'
 require_relative '../lib/release_numbers'
 require_relative '../lib/release_tags'
@@ -16,6 +17,27 @@ Fastlane.load_actions
 
 class SharedReleaseCheck < Minitest::Test
   FASTFILE = File.expand_path('../Fastfile', __dir__)
+
+  def test_project_root_walks_past_a_nested_fastlane_directory
+    Dir.mktmpdir('nested-fastlane-') do |root|
+      FileUtils.mkdir_p(File.join(root, 'fastlane', 'fastlane'))
+      File.write(File.join(root, 'pubspec.yaml'), "name: fixture\nversion: 1.0.0+1\n")
+      File.write(File.join(root, 'fastlane', 'Fastfile'), "# frozen_string_literal: true\n")
+
+      assert_equal root, FlutterProjectRoot.resolve(File.join(root, 'fastlane'))
+      assert_equal root, FlutterProjectRoot.resolve(File.join(root, 'fastlane', 'fastlane'))
+    end
+  end
+
+  def test_project_root_rejects_a_directory_with_no_flutter_app
+    error = assert_raises(ArgumentError) { FlutterProjectRoot.resolve('') }
+    assert_match(/application fastlane/, error.message)
+
+    Dir.mktmpdir('missing-pubspec-') do |root|
+      error = assert_raises(ArgumentError) { FlutterProjectRoot.resolve(root) }
+      assert_match(/pubspec.yaml not found/, error.message)
+    end
+  end
 
   def test_notes_runner_does_not_inherit_release_secrets
     Dir.mktmpdir('codex-runner-check-') do |root|

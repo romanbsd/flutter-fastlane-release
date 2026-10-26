@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative '../lib/flutter_project_root'
 require_relative '../lib/pubspec_version'
 require_relative '../lib/release_numbers'
 
@@ -9,9 +10,7 @@ module Fastlane
       def self.run(params)
         path = params[:pubspec_path].to_s.strip
         if path.empty?
-          fastlane_dir = FastlaneCore::FastlaneFolder.path
-          UI.user_error!('Provide pubspec_path; no application fastlane directory was found.') if fastlane_dir.to_s.empty?
-          path = File.join(fastlane_dir, '..', 'pubspec.yaml')
+          path = File.join(FlutterProjectRoot.from_fastlane_folder, 'pubspec.yaml')
         end
         path = File.expand_path(path)
         UI.user_error!("pubspec.yaml not found: #{path}") unless File.file?(path)

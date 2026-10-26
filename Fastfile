@@ -7,6 +7,7 @@ require 'plist'
 require 'rexml/document'
 require 'tmpdir'
 require_relative 'lib/pubspec_version'
+require_relative 'lib/flutter_project_root'
 require_relative 'lib/codex_runner'
 require_relative 'lib/release_git'
 require_relative 'lib/release_numbers'
@@ -25,9 +26,9 @@ extend ReleaseWorkflow
 default_platform(:android)
 
 def project_root
-  fastlane_dir = FastlaneCore::FastlaneFolder.path
-  UI.user_error!('Import this Fastfile from an application fastlane/Fastfile.') if fastlane_dir.to_s.empty?
-  File.expand_path('..', fastlane_dir)
+  FlutterProjectRoot.from_fastlane_folder
+rescue ArgumentError => error
+  UI.user_error!(error.message)
 end
 
 def flutter(*)
