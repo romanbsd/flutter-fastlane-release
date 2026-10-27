@@ -34,6 +34,7 @@ Keep a root `Gemfile` and lockfile with Fastlane, an app-specific
 | `ios release` | Submit an existing build for App Review (`IOS_RELEASE_MODE=app_store_submission`) |
 | `ios firebase_beta` / `android firebase_beta` | Ad hoc build via Firebase (`ENABLE_FIREBASE_DISTRIBUTION=true`) |
 | `android store_listing` | Upload Play metadata and images without a build |
+| `android screenshots serial:<adb serial>` | Capture Play phone screenshots on an emulator (see below) |
 | `draft_release_notes build_number:<n>` | Draft notes without committing them |
 | `bump_build_version build_number:<n>` | Raise the pubspec build without deploying |
 | `test` | `flutter analyze` and `flutter test` |
@@ -191,11 +192,52 @@ distribution remain opt-in.
 | `ENABLE_FIREBASE_DISTRIBUTION` | Enable the Firebase lanes |
 | `FIREBASE_IOS_GROUPS`, `FIREBASE_ANDROID_GROUPS` | Firebase tester groups (default `beta-testers`) |
 | `GOOGLESERVICE_INFO_PLIST_PATH` | iOS Firebase config path |
+| `PLAY_SCREENSHOTS` | Comma-separated screenshot names `android screenshots` must capture |
+| `PLAY_SCREENSHOTS_TEST`, `PLAY_SCREENSHOTS_LOCALE` | Screenshot driver (default `integration_test/store_screenshots_test.dart`) and metadata locale (default `en-US`) |
+| `APP_IDENTIFIER` | Bundle ID for the App Store tools when the Appfile computes it |
 | `BUNDLETOOL_JAR` | bundletool JAR used to read AAB metadata |
+
+## Store screenshots
+
+### Google Play
+
+`android screenshots` runs the app's screenshot driver on an attached emulator or
+device and writes `fastlane/metadata/android/<locale>/images/phoneScreenshots/`,
+which `android store_listing` uploads. The display is switched to 1080 x 1920
+(Play rejects anything taller than 2:1) with a clean demo status bar, then reset.
+
+The app provides `integration_test/store_screenshots_test.dart`: seed demo data,
+navigate, wait for each screen's content, then print `PLAY_SHOT <name>` and hold
+the screen for about three seconds. Every marker becomes `<name>.png` from a real
+`adb screencap`, so blur and shaders render exactly as on a phone. The committed
+set is replaced only when every name in `PLAY_SCREENSHOTS` was captured.
+
+```ruby
+# fastlane/Fastfile, before the import
+ENV['PLAY_SCREENSHOTS'] ||= '01-home,02-detail,03-settings'
+```
+
+### App Store Connect
+
+Standalone tools run from the app root with its `fastlane/.env` and Appfile
+`app_identifier` (or `APP_IDENTIFIER`). Each defaults to a read-only plan:
+
+```sh
+bundle exec ruby vendor/flutter-fastlane-release/tools/app_store_status.rb
+bundle exec ruby vendor/flutter-fastlane-release/tools/app_store_screenshots.rb --version 1.2.0 --build 21 [--upload]
+bundle exec ruby vendor/flutter-fastlane-release/tools/app_store_release_mode.rb --version 1.2.0 --build 21 --mode manual [--apply]
+bundle exec ruby vendor/flutter-fastlane-release/tools/upload_existing_ios.rb --ipa build/ios/ipa/App.ipa --version 1.2.0 --build 21 [--upload]
+```
+
+`app_store_screenshots.rb` uploads every PNG in
+`fastlane/screenshots/en-US/iphone-medium/` (1206 x 2622) and `ipad/`
+(2064 x 2752) to a Prepare for Submission draft whose selected build matches,
+validates headers and Apple upload targets first, never deletes screenshots,
+and is safe to rerun.
 
 ## Verification and upgrades
 
-Run `bundle exec ruby test/release_check.rb` in this repository. Dependabot
+Run `bundle exec ruby test/release_check.rb` and `bundle exec ruby test/app_store_tools_check.rb` in this repository. Dependabot
 checks the standalone test bundle and CI actions weekly; review its PRs and
 the passing CI job before merging. Before
 updating the submodule pin, review the shared commit range, run this test, and

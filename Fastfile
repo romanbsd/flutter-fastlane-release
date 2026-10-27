@@ -766,6 +766,12 @@ platform :android do
     upload_to_play_store(**play_store_listing_options(metadata_path))
   end
 
+  desc 'Capture Play phone screenshots on an attached emulator (serial:<adb serial>); upload them with store_listing'
+  lane :screenshots do |options|
+    script = File.expand_path('scripts/play_screenshots.sh', __dir__)
+    Dir.chdir(project_root) { sh(script, options[:serial].to_s) }
+  end
+
   desc 'Build a signed APK and distribute it through Firebase when enabled'
   lane :firebase_beta do
     run_firebase_release(:android)
