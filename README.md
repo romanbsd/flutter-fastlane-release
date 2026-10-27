@@ -212,6 +212,12 @@ the screen for about three seconds. Every marker becomes `<name>.png` from a rea
 `adb screencap`, so blur and shaders render exactly as on a phone. The committed
 set is replaced only when every name in `PLAY_SCREENSHOTS` was captured.
 
+The shared `packages/play_screenshot_driver` Dart package provides
+`PlayScreenshotDriver` for the settle/marker/hold sequence. Each app adds it as
+a path dev dependency from the Fastlane submodule and keeps only its fixture
+setup, navigation, and screen landmarks in the integration test. Supply
+`wait` with real-time delays and `pump` with widget frame pumps.
+
 ```ruby
 # fastlane/Fastfile, before the import
 ENV['PLAY_SCREENSHOTS'] ||= '01-home,02-detail,03-settings'

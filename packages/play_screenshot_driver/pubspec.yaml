@@ -1,0 +1,7 @@
+name: fastlane_play_screenshot_driver
+description: Shared marker and timing helper for Flutter screenshots captured by Fastlane.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: '>=3.13.0 <4.0.0'
