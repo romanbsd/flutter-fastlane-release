@@ -26,7 +26,7 @@ module ReleaseGit
   end
 
   def head_bytes(root, relative_path)
-    text, success = capture(root, 'git', 'show', "HEAD:#{relative_path}")
+    text, success = capture(root, 'git', 'show', "HEAD:./#{relative_path}")
     success ? text : nil
   end
 

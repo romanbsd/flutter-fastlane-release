@@ -39,6 +39,23 @@ class SharedReleaseCheck < Minitest::Test
     end
   end
 
+  def test_committed_inputs_and_notes_resolve_inside_a_monorepo
+    write('apps/mobile/pubspec.yaml', "name: nested\nversion: 1.1.0+31\n")
+    write('apps/mobile/fastlane/release_notes/1.1.0+31.txt', "Nested app changes\n")
+    git!('add', 'apps')
+    git!('commit', '-qm', 'nested Flutter app')
+    app = File.join(@root, 'apps/mobile')
+    @fastfile.instance_variable_set(:@fixture_root, app)
+
+    @fastfile.ensure_release_inputs_committed
+    assert_equal 'Nested app changes', @fastfile.release_notes(version: '1.1.0', build_number: 31)
+    assert_nil ReleaseGit.head_bytes(app, 'missing.txt')
+
+    File.write(File.join(app, 'pubspec.yaml'), "name: nested\nversion: 1.1.0+32\n")
+    error = assert_raises(FastlaneCore::Interface::FastlaneError) { @fastfile.ensure_release_inputs_committed }
+    assert_match(/pubspec.yaml changed/, error.message)
+  end
+
   def test_notes_runner_does_not_inherit_release_secrets
     Dir.mktmpdir('codex-runner-check-') do |root|
       log = File.join(root, 'log.txt')
